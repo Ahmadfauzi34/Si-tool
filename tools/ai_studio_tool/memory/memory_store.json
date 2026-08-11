@@ -1,0 +1,137 @@
+{
+  "schema_version": "4.0.0-memory",
+  "created_at": "2026-08-09T17:09:44.638899Z",
+  "updated_at": "2026-08-11T04:42:35.003613Z",
+  "memories": [
+    {
+      "id": "ep_1e381562",
+      "type": "episodic",
+      "content": "Inisialisasi sistem memori terpadu HoTT Kernel 4.0",
+      "source": "manual",
+      "timestamp": "2026-08-09T17:09:44.639104Z",
+      "importance": 0.9,
+      "access_count": 0,
+      "last_accessed": "2026-08-09T17:09:44.639108Z",
+      "tags": [
+        "system",
+        "init"
+      ],
+      "context": {},
+      "consolidated_into": "sem_465d0793"
+    },
+    {
+      "id": "sem_7524342d",
+      "type": "semantic",
+      "content": "Konsep Homotopy Type Theory menghubungkan tipe data dengan ruang topologi",
+      "source": "manual",
+      "timestamp": "2026-08-09T17:09:48.264307Z",
+      "importance": 0.85,
+      "access_count": 0,
+      "last_accessed": "2026-08-09T17:09:48.264322Z",
+      "tags": [
+        "hott",
+        "theory"
+      ],
+      "context": {},
+      "consolidated_into": null
+    },
+    {
+      "id": "proc_13cc9df6",
+      "type": "procedural",
+      "content": "Prosedur validasi proyek dengan fixture_check.py sebelum rilis",
+      "source": "manual",
+      "timestamp": "2026-08-09T17:09:48.338238Z",
+      "importance": 0.95,
+      "access_count": 0,
+      "last_accessed": "2026-08-09T17:09:48.338253Z",
+      "tags": [
+        "procedure",
+        "validation"
+      ],
+      "context": {},
+      "consolidated_into": "sem_465d0793"
+    },
+    {
+      "id": "sem_465d0793",
+      "type": "semantic",
+      "content": "Pola integrasi memori sistem dan prosedur validasi otomatis",
+      "source": "consolidation:ep_1e381562,proc_13cc9df6",
+      "timestamp": "2026-08-11T04:42:29.914367Z",
+      "importance": 0.9,
+      "access_count": 0,
+      "last_accessed": "2026-08-11T04:42:29.914381Z",
+      "tags": [
+        "pattern",
+        "consolidated",
+        "consolidated"
+      ],
+      "context": {
+        "consolidated_from": [
+          "ep_1e381562",
+          "proc_13cc9df6"
+        ],
+        "pattern_type": "correlation",
+        "confidence": 0.8,
+        "consolidation_batch": "batch_9dd363"
+      },
+      "consolidated_into": null
+    },
+    {
+      "id": "ep_674e5944",
+      "type": "episodic",
+      "content": "Uji coba deteksi drift pada topologi memori",
+      "source": "manual",
+      "timestamp": "2026-08-11T04:42:35.003550Z",
+      "importance": 0.6,
+      "access_count": 0,
+      "last_accessed": "2026-08-11T04:42:35.003564Z",
+      "tags": [],
+      "context": {},
+      "consolidated_into": null
+    }
+  ],
+  "associations": [
+    {
+      "id": "assoc_eab60e67",
+      "from": "ep_1e381562",
+      "to": "sem_7524342d",
+      "type": "consolidation",
+      "strength": 0.9,
+      "created_at": "2026-08-11T04:42:07.773278Z",
+      "metadata": {}
+    },
+    {
+      "id": "assoc_c4db9641",
+      "from": "sem_7524342d",
+      "to": "proc_13cc9df6",
+      "type": "derivation",
+      "strength": 0.95,
+      "created_at": "2026-08-11T04:42:07.847401Z",
+      "metadata": {}
+    },
+    {
+      "id": "assoc_a1213810",
+      "from": "ep_1e381562",
+      "to": "sem_465d0793",
+      "type": "consolidation",
+      "strength": 0.8,
+      "created_at": "2026-08-11T04:42:29.914935Z",
+      "metadata": {
+        "reason": "colimit_construction",
+        "consolidation_batch": "batch_9dd363"
+      }
+    },
+    {
+      "id": "assoc_78a34f98",
+      "from": "proc_13cc9df6",
+      "to": "sem_465d0793",
+      "type": "consolidation",
+      "strength": 0.8,
+      "created_at": "2026-08-11T04:42:29.915468Z",
+      "metadata": {
+        "reason": "colimit_construction",
+        "consolidation_batch": "batch_9dd363"
+      }
+    }
+  ]
+}

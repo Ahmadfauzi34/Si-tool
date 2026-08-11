@@ -1,0 +1,285 @@
+[
+  {
+    "name": "hott_kernel",
+    "description": "Unified HoTT Kernel: single entry point untuk seluruh analisis codebase dan memory store. Menjalankan 12 codebase analyzer (topo, perf, hott) dan 5 memory analyzer. Mode 'analyze' untuk findings, 'synthesize' untuk fingerprint + health score + correlations, 'steer' untuk drift detection + steering signals, 'establish' untuk baseline, 'impact'/'outline'/'brief' untuk targeted file analysis, 'memory_store'/'memory_recall'/'memory_analyze'/'memory_stats'/'memory_associate'/'memory_consolidate'/'memory_steer'/'memory_establish'/'memory_drift' untuk memory domain. Gunakan ini sebagai pengganti semua tool terpisah.",
+    "parameters": {
+      "type": "OBJECT",
+      "properties": {
+        "mode": {
+          "type": "STRING",
+          "description": "Mode operasi: analyze | synthesize | steer | establish | impact | outline | brief | analyzers | memory_store | memory_recall | memory_analyze | memory_stats | memory_associate | memory_consolidate | memory_steer | memory_establish | memory_drift"
+        },
+        "scan_root": {
+          "type": "STRING",
+          "description": "Root directory untuk scan. Default: 'src'. Untuk mode impact/outline/brief, ini adalah root proyek."
+        },
+        "target_file": {
+          "type": "STRING",
+          "description": "Path relatif file target untuk mode impact/outline/brief, contoh: 'src/app/app.ts'"
+        },
+        "analyzers": {
+          "type": "STRING",
+          "description": "Comma-separated daftar analyzer untuk mode analyze (optional, default: semua 12). Contoh: 'perf.async,perf.deopt,topo.circular'"
+        },
+        "output": {
+          "type": "STRING",
+          "description": "Format output: full | summary | findings | graph. Default: full"
+        }
+      },
+      "required": [
+        "mode"
+      ]
+    }
+  },
+  {
+    "name": "scan_topology",
+    "description": "[DEPRECATED: gunakan hott_kernel mode=analyze] Memindai seluruh struktur direktori kode TS/JS/TSX/JSX. Fungsi ini tetap tersedia untuk backward compatibility, namun disarankan menggunakan hott_kernel mode=analyze.",
+    "parameters": {
+      "type": "OBJECT",
+      "properties": {
+        "path": {
+          "type": "STRING",
+          "description": "Lokasi root direktori proyek. Default adalah '.'"
+        }
+      }
+    }
+  },
+  {
+    "name": "get_impacted_files",
+    "description": "[DEPRECATED: gunakan hott_kernel mode=impact] Melacak file mana saja yang mengimpor atau diimpor oleh file target. Fungsi ini tetap tersedia untuk backward compatibility, namun disarankan menggunakan hott_kernel mode=impact.",
+    "parameters": {
+      "type": "OBJECT",
+      "properties": {
+        "file_path": {
+          "type": "STRING",
+          "description": "Path relatif file yang ingin dianalisis dampaknya, contoh: 'src/app/app.ts'"
+        },
+        "path": {
+          "type": "STRING",
+          "description": "Root proyek opsional. Default adalah '.'"
+        }
+      },
+      "required": [
+        "file_path"
+      ]
+    }
+  },
+  {
+    "name": "get_file_outline",
+    "description": "[DEPRECATED: gunakan hott_kernel mode=outline] Ekstrak outline ringkas dari file TS/JS/TSX/JSX. Fungsi ini tetap tersedia untuk backward compatibility, namun disarankan menggunakan hott_kernel mode=outline.",
+    "parameters": {
+      "type": "OBJECT",
+      "properties": {
+        "file_path": {
+          "type": "STRING",
+          "description": "Path relatif file yang ingin diekstrak outlinenya, contoh: 'src/app/app.ts'"
+        }
+      },
+      "required": [
+        "file_path"
+      ]
+    }
+  },
+  {
+    "name": "get_file_brief",
+    "description": "[DEPRECATED: gunakan hott_kernel mode=brief] Menggabungkan outline file dan impact analysis. Fungsi ini tetap tersedia untuk backward compatibility, namun disarankan menggunakan hott_kernel mode=brief.",
+    "parameters": {
+      "type": "OBJECT",
+      "properties": {
+        "file_path": {
+          "type": "STRING",
+          "description": "Path relatif file target, contoh: 'src/app/app.ts'"
+        },
+        "path": {
+          "type": "STRING",
+          "description": "Root proyek opsional. Default adalah '.'"
+        }
+      },
+      "required": [
+        "file_path"
+      ]
+    }
+  },
+  {
+    "name": "detect_async_issues",
+    "description": "[DEPRECATED: gunakan hott_kernel mode=analyze analyzers=perf.async] Mendeteksi async anti-pattern.",
+    "parameters": {
+      "type": "OBJECT",
+      "properties": {
+        "file_path": {
+          "type": "STRING",
+          "description": "Path file atau folder"
+        },
+        "mode": {
+          "type": "STRING",
+          "description": "'file' atau 'scan'"
+        }
+      },
+      "required": [
+        "file_path"
+      ]
+    }
+  },
+  {
+    "name": "detect_deopt_patterns",
+    "description": "[DEPRECATED: gunakan hott_kernel mode=analyze analyzers=perf.deopt] Mendeteksi pola V8 deopt.",
+    "parameters": {
+      "type": "OBJECT",
+      "properties": {
+        "file_path": {
+          "type": "STRING",
+          "description": "Path file atau folder"
+        },
+        "mode": {
+          "type": "STRING",
+          "description": "'file' atau 'scan'"
+        }
+      },
+      "required": [
+        "file_path"
+      ]
+    }
+  },
+  {
+    "name": "detect_gc_pressure",
+    "description": "[DEPRECATED: gunakan hott_kernel mode=analyze analyzers=perf.gc] Mendeteksi GC pressure dan memory leak.",
+    "parameters": {
+      "type": "OBJECT",
+      "properties": {
+        "file_path": {
+          "type": "STRING",
+          "description": "Path file atau folder"
+        },
+        "mode": {
+          "type": "STRING",
+          "description": "'file' atau 'scan'"
+        }
+      },
+      "required": [
+        "file_path"
+      ]
+    }
+  },
+  {
+    "name": "audit_cache_patterns",
+    "description": "[DEPRECATED: gunakan hott_kernel mode=analyze analyzers=perf.cache] Mengaudit implementasi cache.",
+    "parameters": {
+      "type": "OBJECT",
+      "properties": {
+        "file_path": {
+          "type": "STRING",
+          "description": "Path file atau folder"
+        },
+        "mode": {
+          "type": "STRING",
+          "description": "'file' atau 'scan'"
+        }
+      },
+      "required": [
+        "file_path"
+      ]
+    }
+  },
+  {
+    "name": "observe_type_isomorphisms",
+    "description": "[DEPRECATED: gunakan hott_kernel mode=analyze analyzers=hott.isomorphism] Type Isomorphism Observer.",
+    "parameters": {
+      "type": "OBJECT",
+      "properties": {
+        "file_path": {
+          "type": "STRING",
+          "description": "Path file atau folder"
+        },
+        "mode": {
+          "type": "STRING",
+          "description": "'file' atau 'scan'"
+        }
+      },
+      "required": [
+        "file_path"
+      ]
+    }
+  },
+  {
+    "name": "observe_boundary_obstructions",
+    "description": "[DEPRECATED: gunakan hott_kernel mode=analyze analyzers=hott.sheaf] Sheaf Cohomology Observer.",
+    "parameters": {
+      "type": "OBJECT",
+      "properties": {
+        "scan_root": {
+          "type": "STRING",
+          "description": "Root folder. Default: 'src'"
+        }
+      }
+    }
+  },
+  {
+    "name": "observe_homotopy_paths",
+    "description": "[DEPRECATED: gunakan hott_kernel mode=analyze analyzers=hott.homotopy] Homotopy Path Observer.",
+    "parameters": {
+      "type": "OBJECT",
+      "properties": {
+        "scan_root": {
+          "type": "STRING",
+          "description": "Root folder. Default: 'src'"
+        }
+      }
+    }
+  },
+  {
+    "name": "synthesize_topological_integrity",
+    "description": "[DEPRECATED: gunakan hott_kernel mode=synthesize] Topological Integrity Orchestrator.",
+    "parameters": {
+      "type": "OBJECT",
+      "properties": {
+        "scan_root": {
+          "type": "STRING",
+          "description": "Root folder. Default: 'src'"
+        }
+      }
+    }
+  },
+  {
+    "name": "build_topological_manifold",
+    "description": "[DEPRECATED: gunakan hott_kernel mode=analyze analyzers=hott.manifold] Topological Manifold Builder.",
+    "parameters": {
+      "type": "OBJECT",
+      "properties": {
+        "scan_root": {
+          "type": "STRING",
+          "description": "Root folder. Default: 'src'"
+        }
+      }
+    }
+  },
+  {
+    "name": "encode_topological_invariants",
+    "description": "[DEPRECATED: gunakan hott_kernel mode=synthesize] Invariant Encoder.",
+    "parameters": {
+      "type": "OBJECT",
+      "properties": {
+        "scan_root": {
+          "type": "STRING",
+          "description": "Root folder. Default: 'src'"
+        }
+      }
+    }
+  },
+  {
+    "name": "steer_decoder",
+    "description": "[DEPRECATED: gunakan hott_kernel mode=steer atau mode=establish] Topological Decoder Steering.",
+    "parameters": {
+      "type": "OBJECT",
+      "properties": {
+        "mode": {
+          "type": "STRING",
+          "description": "'establish' atau 'steer'"
+        },
+        "scan_root": {
+          "type": "STRING",
+          "description": "Root folder. Default: 'src'"
+        }
+      }
+    }
+  }
+]

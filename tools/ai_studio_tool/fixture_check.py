@@ -1,0 +1,1842 @@
+#!/usr/bin/env python3
+"""
+Fixture check minimal untuk mengunci baseline file_scanner.
+
+Fixture yang dikunci:
+- F01 basic relative import
+- F02 extensionless import
+- F04 tsx/jsx support
+- F05 unresolved import tidak menjadi edge utama
+- F09 circular dependency aman
+
+Script ini:
+- membuat fixture otomatis
+- menjalankan scan_topology
+- menjalankan get_impacted_files
+- melakukan assertion minimal
+"""
+
+import os
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent
+os.chdir(ROOT)
+
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+import file_scanner
+
+FIXTURES = {
+    # F01 basic relative import
+    Path("fixtures_min/f01_basic/project/src/a.ts"): (
+        "export const a = 'a';\n"
+    ),
+    Path("fixtures_min/f01_basic/project/src/b.ts"): (
+        "import { a } from './a.ts';\n"
+        "export const b = a;\n"
+    ),
+
+    # F02 extensionless import
+    Path("fixtures_min/f02_extensionless/project/src/logger.ts"): (
+        "export function log() { return true; }\n"
+    ),
+    Path("fixtures_min/f02_extensionless/project/src/app.ts"): (
+        "import { log } from './logger';\n"
+        "export const app = log;\n"
+    ),
+
+    # F04 tsx/jsx support
+    Path("fixtures_min/f04_tsx_jsx/project/src/Button.tsx"): (
+        "export const Button = () => null;\n"
+    ),
+    Path("fixtures_min/f04_tsx_jsx/project/src/Card.jsx"): (
+        "export const Card = () => null;\n"
+    ),
+    Path("fixtures_min/f04_tsx_jsx/project/src/app.tsx"): (
+        "import { Button } from './Button';\n"
+        "import { Card } from './Card';\n"
+        "export const App = () => null;\n"
+    ),
+
+    # F05 unresolved import
+    Path("fixtures_min/f05_unresolved/project/src/app.ts"): (
+        "import { missing } from './missing';\n"
+        "export const app = true;\n"
+    ),
+
+    # F09 circular dependency
+    Path("fixtures_min/f09_circular/project/src/a.ts"): (
+        "import './b';\n"
+        "export const a = 'a';\n"
+    ),
+    Path("fixtures_min/f09_circular/project/src/b.ts"): (
+        "import './c';\n"
+        "export const b = 'b';\n"
+    ),
+    Path("fixtures_min/f09_circular/project/src/c.ts"): (
+        "import './a';\n"
+        "export const c = 'c';\n"
+    ),
+
+    # F08 entrypoint detection
+    Path("fixtures_min/f08_entrypoint/project/src/main.ts"): (
+        "import './app';\n"
+        "export const main = true;\n"
+    ),
+    Path("fixtures_min/f08_entrypoint/project/src/app.ts"): (
+        "import './util';\n"
+        "export const app = true;\n"
+    ),
+    Path("fixtures_min/f08_entrypoint/project/src/util.ts"): (
+        "export const util = true;\n"
+    ),
+
+    # F10 graph metrics
+    Path("fixtures_min/f10_graph_metrics/project/src/a.ts"): (
+        "import './d';\n"
+        "export const a = 'a';\n"
+    ),
+    Path("fixtures_min/f10_graph_metrics/project/src/b.ts"): (
+        "import './a';\n"
+        "export const b = 'b';\n"
+    ),
+    Path("fixtures_min/f10_graph_metrics/project/src/c.ts"): (
+        "import './a';\n"
+        "export const c = 'c';\n"
+    ),
+    Path("fixtures_min/f10_graph_metrics/project/src/d.ts"): (
+        "export const d = 'd';\n"
+    ),
+
+    # F11 change risk advisory
+    Path("fixtures_min/f11_change_risk_advisory/project/src/main.ts"): (
+        "import './app';\n"
+        "export const main = true;\n"
+    ),
+    Path("fixtures_min/f11_change_risk_advisory/project/src/server.ts"): (
+        "import './app';\n"
+        "export const server = true;\n"
+    ),
+    Path("fixtures_min/f11_change_risk_advisory/project/src/app.ts"): (
+        "import './util';\n"
+        "export const app = true;\n"
+    ),
+    Path("fixtures_min/f11_change_risk_advisory/project/src/util.ts"): (
+        "export const util = true;\n"
+    ),
+    Path("fixtures_min/f11_change_risk_advisory/project/src/isolated.ts"): (
+        "export const isolated = true;\n"
+    ),
+
+    # F12 unreferenced files observation
+    Path("fixtures_min/f12_unreferenced_files/project/src/main.ts"): (
+        "import './app';\n"
+        "export const main = true;\n"
+    ),
+    Path("fixtures_min/f12_unreferenced_files/project/src/app.ts"): (
+        "import './util';\n"
+        "export const app = true;\n"
+    ),
+    Path("fixtures_min/f12_unreferenced_files/project/src/util.ts"): (
+        "export const util = true;\n"
+    ),
+    Path("fixtures_min/f12_unreferenced_files/project/src/unused.ts"): (
+        "export const unused = true;\n"
+    ),
+    Path("fixtures_min/f12_unreferenced_files/project/src/app.spec.ts"): (
+        "export const spec = true;\n"
+    ),
+    Path("fixtures_min/f13_multi_root/root_a/a.ts"): (
+        "import '../root_b/b';\n"
+        "export const a = true;\n"
+    ),
+    Path("fixtures_min/f13_multi_root/root_b/b.ts"): (
+        "export const b = true;\n"
+    ),
+    Path("fixtures_min/f13_multi_root/root_b/c.ts"): (
+        "import './b';\n"
+        "export const c = true;\n"
+    ),
+    # F14 file outline
+    Path("fixtures_min/f14_outline/project/src/sample.ts"): (
+        "import './util';\n"
+        "import { externalThing } from 'some-lib';\n"
+        "\n"
+        "export interface Sample {\n"
+        "  id: string;\n"
+        "}\n"
+        "\n"
+        "export type SampleId = string;\n"
+        "\n"
+        "export const sampleName = 'sample';\n"
+        "\n"
+        "export function sampleFunction(value: string) {\n"
+        "  return value;\n"
+        "}\n"
+        "\n"
+        "export class SampleClass {\n"
+        "  run() {\n"
+        "    return true;\n"
+        "  }\n"
+        "}\n"
+    ),
+    Path("fixtures_min/f14_outline/project/src/util.ts"): (
+        "export const util = true;\n"
+    ),
+    # F15 alias paths
+    Path("fixtures_min/f15_alias_paths/project/tsconfig.json"): (
+        "{\n"
+        "  \"compilerOptions\": {\n"
+        "    \"baseUrl\": \".\",\n"
+        "    \"paths\": {\n"
+        "      \"@app/*\": [\"src/app/*\"],\n"
+        "      \"@core/*\": [\"src/core/*\"]\n"
+        "    }\n"
+        "  }\n"
+        "}\n"
+    ),
+    Path("fixtures_min/f15_alias_paths/project/src/core/logger.ts"): (
+        "export const logger = true;\n"
+    ),
+    Path("fixtures_min/f15_alias_paths/project/src/app/app.ts"): (
+        "import { logger } from '@core/logger';\n"
+        "import { externalThing } from 'some-lib';\n"
+        "export const app = logger;\n"
+    ),
+    # F16 file brief context budgeting
+    Path("fixtures_min/f16_file_brief/project/src/main.ts"): (
+        "import './app';\n"
+        "export const main = true;\n"
+    ),
+    Path("fixtures_min/f16_file_brief/project/src/app.ts"): (
+        "import './util';\n"
+        "export function runApp() { return true; }\n"
+        "export class AppService {}\n"
+    ),
+    Path("fixtures_min/f16_file_brief/project/src/util.ts"): (
+        "export const util = true;\n"
+    ),
+    # F17 async waterfall detection
+    Path("fixtures_min/f17_async_waterfall/project/src/service.ts"): (
+        "import { Injectable } from '@angular/core';\n"
+        "\n"
+        "@Injectable()\n"
+        "export class DataService {\n"
+        "  async loadData() {\n"
+        "    const users = await this.fetchUsers();\n"
+        "    const orders = await this.fetchOrders();\n"
+        "    const config = await this.fetchConfig();\n"
+        "    return { users, orders, config };\n"
+        "  }\n"
+        "\n"
+        "  async processItems(ids: string[]) {\n"
+        "    for (const id of ids) {\n"
+        "      const item = await this.fetchItem(id);\n"
+        "      console.log(item);\n"
+        "    }\n"
+        "  }\n"
+        "}\n"
+    ),
+    # F18 deopt checker
+    Path("fixtures_min/f18_deopt_checker/project/src/service.ts"): (
+        "export class DataService {\n"
+        "  processConfig() {\n"
+        "    const config = { host: 'localhost', port: 3000 };\n"
+        "    config.timeout = 5000;\n"
+        "    delete config.port;\n"
+        "    return config;\n"
+        "  }\n"
+        "\n"
+        "  dynamicEval(code: string) {\n"
+        "    return eval(code);\n"
+        "  }\n"
+        "}\n"
+    ),
+    # F19 gc pressure
+    Path("fixtures_min/f19_gc_pressure/project/src/processor.ts"): (
+        "export class DataProcessor {\n"
+        "  private cache = new Map();\n"
+        "\n"
+        "  processItems(items: any[]) {\n"
+        "    const results = [];\n"
+        "    for (const item of items) {\n"
+        "      const parsed = JSON.parse(item.data);\n"
+        "      const result = { id: parsed.id, value: parsed.value };\n"
+        "      results.push(result);\n"
+        "    }\n"
+        "    return results;\n"
+        "  }\n"
+        "\n"
+        "  setupPolling() {\n"
+        "    const timer = setInterval(() => {\n"
+        "      this.poll();\n"
+        "    }, 5000);\n"
+        "  }\n"
+        "\n"
+        "  attachListener(el: HTMLElement) {\n"
+        "    el.addEventListener('resize', this.handleResize);\n"
+        "  }\n"
+        "}\n"
+    ),
+    # F20 cache auditor
+    Path("fixtures_min/f20_cache_audit/project/src/cache.service.ts"): (
+        "export class CacheService {\n"
+        "  private dataCache = new Map();\n"
+        "  private sessionCache = new Map();\n"
+        "\n"
+        "  setWithTimestamp(key: string, value: any) {\n"
+        "    const cacheKey = key + Date.now();\n"
+        "    this.dataCache.set(cacheKey, value);\n"
+        "  }\n"
+        "\n"
+        "  setWithConcat(userId: string, productId: string) {\n"
+        "    const key = userId + productId;\n"
+        "    this.dataCache.set(key, { userId, productId });\n"
+        "  }\n"
+        "\n"
+        "  setObjectKey(config: any, result: any) {\n"
+        "    this.sessionCache.set(config, result);\n"
+        "  }\n"
+        "\n"
+        "  getWithObject(config: any) {\n"
+        "    return this.sessionCache.get(config);\n"
+        "  }\n"
+        "}\n"
+    ),
+    # F21 type isomorphism observer (proto-HoTT)
+    Path("fixtures_min/f21_type_isomorphism/project/src/types.ts"): (
+        "export interface UserDTO {\n"
+        "  id: string;\n"
+        "  name: string;\n"
+        "  email: string;\n"
+        "}\n"
+        "\n"
+        "export interface UserViewModel {\n"
+        "  id: string;\n"
+        "  name: string;\n"
+        "  email: string;\n"
+        "}\n"
+        "\n"
+        "export interface Product {\n"
+        "  sku: string;\n"
+        "  price: number;\n"
+        "}\n"
+        "\n"
+        "export type ProductAlias = {\n"
+        "  sku: string;\n"
+        "  price: number;\n"
+        "};\n"
+        "\n"
+        "export interface Order {\n"
+        "  orderId: string;\n"
+        "  total: number;\n"
+        "  createdAt: string;\n"
+        "}\n"
+    ),
+    # F22 boundary sheaf checker
+    Path("fixtures_min/f22_boundary_sheaf/project/src/core/index.ts"): (
+        "export { AuthService } from './services/auth.service';\n"
+        "export type { CoreConfig } from './types';\n"
+    ),
+    Path("fixtures_min/f22_boundary_sheaf/project/src/core/services/auth.service.ts"): (
+        "export class AuthService {\n"
+        "  login() { return true; }\n"
+        "}\n"
+    ),
+    Path("fixtures_min/f22_boundary_sheaf/project/src/core/types.ts"): (
+        "export interface CoreConfig {\n"
+        "  apiUrl: string;\n"
+        "  timeout: number;\n"
+        "}\n"
+    ),
+    Path("fixtures_min/f22_boundary_sheaf/project/src/app/index.ts"): (
+        "export { AppComponent } from './app.component';\n"
+    ),
+    Path("fixtures_min/f22_boundary_sheaf/project/src/app/app.component.ts"): (
+        "import { AuthService } from '../core/services/auth.service';\n"
+        "export class AppComponent {\n"
+        "  constructor(private auth: AuthService) {}\n"
+        "}\n"
+    ),
+    Path("fixtures_min/f22_boundary_sheaf/project/src/app/models.ts"): (
+        "export interface CoreConfig {\n"
+        "  apiUrl: string;\n"
+        "  retries: number;\n"
+        "}\n"
+    ),
+    # F23 boundary sheaf entrypoint + no-barrel precision
+    Path("fixtures_min/f23_sheaf_precision/project/src/main.ts"): (
+        "import { App } from './app/app';\n"
+        "export function bootstrap() { return new App(); }\n"
+    ),
+    Path("fixtures_min/f23_sheaf_precision/project/src/app/app.ts"): (
+        "export class App {}\n"
+    ),
+    # F24 homotopy path observer
+    Path("fixtures_min/f24_homotopy_path/project/src/a.ts"): (
+        "import './b';\n"
+        "import './c';\n"
+        "import './util';\n"
+        "import { helper } from './util';\n"
+        "export const a = true;\n"
+    ),
+    Path("fixtures_min/f24_homotopy_path/project/src/b.ts"): (
+        "import './d';\n"
+        "export const b = true;\n"
+    ),
+    Path("fixtures_min/f24_homotopy_path/project/src/c.ts"): (
+        "import './d';\n"
+        "export const c = true;\n"
+    ),
+    Path("fixtures_min/f24_homotopy_path/project/src/d.ts"): (
+        "export const d = true;\n"
+    ),
+    Path("fixtures_min/f24_homotopy_path/project/src/util.ts"): (
+        "export const helper = true;\n"
+    ),
+    # F25 topological integrity orchestrator
+    Path("fixtures_min/f25_synthesis/project/src/a.ts"): (
+        "import './b';\n"
+        "import './c';\n"
+        "export const a = true;\n"
+    ),
+    Path("fixtures_min/f25_synthesis/project/src/b.ts"): (
+        "import './d';\n"
+        "export const b = true;\n"
+    ),
+    Path("fixtures_min/f25_synthesis/project/src/c.ts"): (
+        "import './d';\n"
+        "export const c = true;\n"
+    ),
+    Path("fixtures_min/f25_synthesis/project/src/d.ts"): (
+        "export const d = true;\n"
+    ),
+    # F26 topological manifold builder
+    Path("fixtures_min/f26_manifold/project/src/a.ts"): (
+        "import './b';\n"
+        "import './c';\n"
+        "export const a = true;\n"
+    ),
+    Path("fixtures_min/f26_manifold/project/src/b.ts"): (
+        "import './c';\n"
+        "export const b = true;\n"
+    ),
+    Path("fixtures_min/f26_manifold/project/src/c.ts"): (
+        "export const c = true;\n"
+    ),
+    # F27 invariant encoder
+    Path("fixtures_min/f27_encoder/project/src/a.ts"): (
+        "import './b';\n"
+        "import './c';\n"
+        "export const a = true;\n"
+    ),
+    Path("fixtures_min/f27_encoder/project/src/b.ts"): (
+        "export const b = true;\n"
+    ),
+    Path("fixtures_min/f27_encoder/project/src/c.ts"): (
+        "export const c = true;\n"
+    ),
+    # F28 decoder steering
+    Path("fixtures_min/f28_steering/project/src/a.ts"): (
+        "import './b';\n"
+        "import './c';\n"
+        "export const a = true;\n"
+    ),
+    Path("fixtures_min/f28_steering/project/src/b.ts"): (
+        "export const b = true;\n"
+    ),
+    Path("fixtures_min/f28_steering/project/src/c.ts"): (
+        "export const c = true;\n"
+    ),
+    # F29 archetype calibration
+    Path("fixtures_min/f29_archetype_calibration/project/src/a.ts"): (
+        "import './b';\n"
+        "export const a = true;\n"
+    ),
+    Path("fixtures_min/f29_archetype_calibration/project/src/b.ts"): (
+        "import './c';\n"
+        "export const b = true;\n"
+    ),
+    Path("fixtures_min/f29_archetype_calibration/project/src/c.ts"): (
+        "import './a';\n"
+        "export const c = true;\n"
+    ),
+    Path("fixtures_min/f29_archetype_calibration/project/src/d.ts"): (
+        "import './e';\n"
+        "export const d = true;\n"
+    ),
+    Path("fixtures_min/f29_archetype_calibration/project/src/e.ts"): (
+        "export const e = true;\n"
+    ),
+    # F30 complexity calibration
+    Path("fixtures_min/f30_complexity_calibration/project/src/a.ts"): (
+        "import './b';\n"
+        "export const a = true;\n"
+    ),
+    Path("fixtures_min/f30_complexity_calibration/project/src/b.ts"): (
+        "export const b = true;\n"
+    ),
+}
+
+FAILURES = []
+
+
+def expect(condition, message):
+    if not condition:
+        FAILURES.append(message)
+
+
+def write_fixtures():
+    for rel_path, content in FIXTURES.items():
+        rel_path.parent.mkdir(parents=True, exist_ok=True)
+        rel_path.write_text(content, encoding="utf-8")
+
+
+def node_ids(topology):
+    return {node["id"] for node in topology.get("nodes", [])}
+
+
+def edge_pairs(topology):
+    return {(edge["source"], edge["target"]) for edge in topology.get("edges", [])}
+
+
+def require_trust_layer(topology, name):
+    expect("summary" in topology, f"{name}: topology harus punya summary")
+    expect("diagnostics" in topology, f"{name}: topology harus punya diagnostics")
+
+
+def test_f01_basic_relative():
+    name = "F01"
+    project = "fixtures_min/f01_basic/project"
+    topology = file_scanner.scan_topology(path=project)
+    require_trust_layer(topology, name)
+
+    expected_nodes = {
+        f"{project}/src/a.ts",
+        f"{project}/src/b.ts",
+    }
+
+    expected_edges = {
+        (f"{project}/src/b.ts", f"{project}/src/a.ts"),
+    }
+
+    expect(topology["summary"]["total_nodes"] == 2, f"{name}: total_nodes harus 2")
+    expect(topology["summary"]["unresolved_import_count"] == 0, f"{name}: unresolved harus 0")
+    expect(node_ids(topology) == expected_nodes, f"{name}: nodes tidak sesuai")
+    expect(edge_pairs(topology) == expected_edges, f"{name}: edges tidak sesuai")
+
+    if topology.get("edges"):
+        edge = topology["edges"][0]
+        expect(edge.get("status") == "resolved", f"{name}: edge harus resolved")
+        expect(edge.get("method") == "exact_match", f"{name}: edge harus exact_match")
+
+    impact = file_scanner.get_impacted_files(
+        f"{project}/src/a.ts",
+        topology=topology
+    )
+
+    expect(
+        impact["downstream"] == [f"{project}/src/b.ts"],
+        f"{name}: downstream a.ts harus b.ts"
+    )
+    expect(
+        impact["upstream"] == [],
+        f"{name}: upstream a.ts harus kosong"
+    )
+
+
+def test_f02_extensionless():
+    name = "F02"
+    project = "fixtures_min/f02_extensionless/project"
+    topology = file_scanner.scan_topology(path=project)
+    require_trust_layer(topology, name)
+
+    expected_nodes = {
+        f"{project}/src/logger.ts",
+        f"{project}/src/app.ts",
+    }
+
+    expected_edges = {
+        (f"{project}/src/app.ts", f"{project}/src/logger.ts"),
+    }
+
+    expect(topology["summary"]["total_nodes"] == 2, f"{name}: total_nodes harus 2")
+    expect(topology["summary"]["unresolved_import_count"] == 0, f"{name}: unresolved harus 0")
+    expect(node_ids(topology) == expected_nodes, f"{name}: nodes tidak sesuai")
+    expect(edge_pairs(topology) == expected_edges, f"{name}: edges tidak sesuai")
+
+    if topology.get("edges"):
+        edge = topology["edges"][0]
+        expect(
+            edge.get("status") == "resolved_with_assumption",
+            f"{name}: extensionless import harus resolved_with_assumption"
+        )
+        expect(
+            edge.get("method") == "extension_match",
+            f"{name}: extensionless import harus extension_match"
+        )
+
+    impact = file_scanner.get_impacted_files(
+        f"{project}/src/logger.ts",
+        topology=topology
+    )
+
+    expect(
+        impact["downstream"] == [f"{project}/src/app.ts"],
+        f"{name}: downstream logger.ts harus app.ts"
+    )
+
+
+def test_f04_tsx_jsx():
+    name = "F04"
+    project = "fixtures_min/f04_tsx_jsx/project"
+    topology = file_scanner.scan_topology(path=project)
+    require_trust_layer(topology, name)
+
+    expected_nodes = {
+        f"{project}/src/Button.tsx",
+        f"{project}/src/Card.jsx",
+        f"{project}/src/app.tsx",
+    }
+
+    expected_edges = {
+        (f"{project}/src/app.tsx", f"{project}/src/Button.tsx"),
+        (f"{project}/src/app.tsx", f"{project}/src/Card.jsx"),
+    }
+
+    expect(topology["summary"]["total_nodes"] == 3, f"{name}: total_nodes harus 3")
+    expect(topology["summary"]["total_edges"] == 2, f"{name}: total_edges harus 2")
+    expect(topology["summary"]["unresolved_import_count"] == 0, f"{name}: unresolved harus 0")
+    expect(node_ids(topology) == expected_nodes, f"{name}: nodes tidak sesuai")
+    expect(edge_pairs(topology) == expected_edges, f"{name}: edges tidak sesuai")
+
+    impact_button = file_scanner.get_impacted_files(
+        f"{project}/src/Button.tsx",
+        topology=topology
+    )
+
+    impact_card = file_scanner.get_impacted_files(
+        f"{project}/src/Card.jsx",
+        topology=topology
+    )
+
+    expect(
+        impact_button["downstream"] == [f"{project}/src/app.tsx"],
+        f"{name}: downstream Button.tsx harus app.tsx"
+    )
+
+    expect(
+        impact_card["downstream"] == [f"{project}/src/app.tsx"],
+        f"{name}: downstream Card.jsx harus app.tsx"
+    )
+
+
+def test_f05_unresolved():
+    name = "F05"
+    project = "fixtures_min/f05_unresolved/project"
+    topology = file_scanner.scan_topology(path=project)
+    require_trust_layer(topology, name)
+
+    expected_nodes = {
+        f"{project}/src/app.ts",
+    }
+
+    expect(topology["summary"]["total_nodes"] == 1, f"{name}: total_nodes harus 1")
+    expect(topology["summary"]["total_edges"] == 0, f"{name}: unresolved tidak boleh jadi edge utama")
+    expect(topology["summary"]["unresolved_import_count"] == 1, f"{name}: unresolved harus 1")
+    expect(node_ids(topology) == expected_nodes, f"{name}: nodes tidak sesuai")
+    expect(edge_pairs(topology) == set(), f"{name}: edges utama harus kosong")
+
+    unresolved = topology["diagnostics"]["unresolved_imports"]
+    expect(len(unresolved) == 1, f"{name}: diagnostics unresolved harus 1 item")
+
+    if unresolved:
+        item = unresolved[0]
+        expect(item.get("importer") == f"{project}/src/app.ts", f"{name}: importer unresolved salah")
+        expect(item.get("raw_import") == "./missing", f"{name}: raw_import unresolved salah")
+        expect("attempted_candidates" in item, f"{name}: unresolved harus punya attempted_candidates")
+
+    impact = file_scanner.get_impacted_files(
+        f"{project}/src/app.ts",
+        topology=topology
+    )
+
+    expect(
+        impact["downstream"] == [],
+        f"{name}: downstream app.ts harus kosong"
+    )
+
+    expect(
+        len(impact.get("unresolved_dependency_warnings", [])) == 1,
+        f"{name}: impact harus membawa unresolved_dependency_warnings"
+    )
+
+
+def test_f09_circular():
+    name = "F09"
+    project = "fixtures_min/f09_circular/project"
+    topology = file_scanner.scan_topology(path=project)
+    require_trust_layer(topology, name)
+
+    expected_nodes = {
+        f"{project}/src/a.ts",
+        f"{project}/src/b.ts",
+        f"{project}/src/c.ts",
+    }
+
+    expected_edges = {
+        (f"{project}/src/a.ts", f"{project}/src/b.ts"),
+        (f"{project}/src/b.ts", f"{project}/src/c.ts"),
+        (f"{project}/src/c.ts", f"{project}/src/a.ts"),
+    }
+
+    expect(topology["summary"]["total_nodes"] == 3, f"{name}: total_nodes harus 3")
+    expect(topology["summary"]["total_edges"] == 3, f"{name}: total_edges harus 3")
+    expect(topology["summary"]["unresolved_import_count"] == 0, f"{name}: unresolved harus 0")
+    expect(node_ids(topology) == expected_nodes, f"{name}: nodes tidak sesuai")
+    expect(edge_pairs(topology) == expected_edges, f"{name}: edges tidak sesuai")
+
+    impact = file_scanner.get_impacted_files(
+        f"{project}/src/a.ts",
+        topology=topology
+    )
+
+    expected_downstream = {
+        f"{project}/src/b.ts",
+        f"{project}/src/c.ts",
+    }
+
+    expect(
+        set(impact["downstream"]) == expected_downstream,
+        f"{name}: downstream a.ts harus mencakup b.ts dan c.ts"
+    )
+
+    expect(
+        len(impact["circular_references"]) > 0,
+        f"{name}: circular_references harus terdeteksi"
+    )
+
+
+def test_f08_entrypoint():
+    name = "F08"
+    project = "fixtures_min/f08_entrypoint/project"
+    topology = file_scanner.scan_topology(path=project)
+    require_trust_layer(topology, name)
+
+    expected_nodes = {
+        f"{project}/src/main.ts",
+        f"{project}/src/app.ts",
+        f"{project}/src/util.ts",
+    }
+
+    expect(topology["summary"]["total_nodes"] == 3, f"{name}: total_nodes harus 3")
+    expect(topology["summary"]["unresolved_import_count"] == 0, f"{name}: unresolved harus 0")
+    expect(node_ids(topology) == expected_nodes, f"{name}: nodes tidak sesuai")
+
+    expect(
+        topology["summary"].get("entrypoint_count") == 1,
+        f"{name}: entrypoint_count harus 1"
+    )
+
+    nodes_by_id = {node["id"]: node for node in topology.get("nodes", [])}
+    main_id = f"{project}/src/main.ts"
+
+    main_node = nodes_by_id.get(main_id, {})
+    expect(
+        main_node.get("is_entrypoint") is True,
+        f"{name}: main.ts harus ditandai sebagai entrypoint"
+    )
+    expect(
+        main_node.get("entrypoint_kind") == "browser_bootstrap",
+        f"{name}: main.ts harus punya entrypoint_kind browser_bootstrap"
+    )
+    expect(
+        main_node.get("entrypoint_confidence", 0) >= 0.8,
+        f"{name}: confidence entrypoint main.ts harus cukup tinggi"
+    )
+
+    impact_util = file_scanner.get_impacted_files(
+        f"{project}/src/util.ts",
+        topology=topology
+    )
+
+    expect(
+        impact_util.get("affected_entrypoints") == [main_id],
+        f"{name}: perubahan util.ts harus berdampak ke main.ts"
+    )
+
+    impact_main = file_scanner.get_impacted_files(
+        main_id,
+        topology=topology
+    )
+
+    expect(
+        impact_main.get("target_is_entrypoint") is True,
+        f"{name}: main.ts harus ditandai sebagai target entrypoint"
+    )
+
+    expect(
+        impact_main.get("affected_entrypoints") == [main_id],
+        f"{name}: impact main.ts harus menyertakan dirinya sebagai affected_entrypoints"
+    )
+
+
+def test_f10_graph_metrics():
+    name = "F10"
+    project = "fixtures_min/f10_graph_metrics/project"
+    topology = file_scanner.scan_topology(path=project)
+    require_trust_layer(topology, name)
+
+    expected_nodes = {
+        f"{project}/src/a.ts",
+        f"{project}/src/b.ts",
+        f"{project}/src/c.ts",
+        f"{project}/src/d.ts",
+    }
+
+    expect(topology["summary"]["total_nodes"] == 4, f"{name}: total_nodes harus 4")
+    expect(topology["summary"]["total_edges"] == 3, f"{name}: total_edges harus 3")
+    expect(topology["summary"]["unresolved_import_count"] == 0, f"{name}: unresolved harus 0")
+    expect(node_ids(topology) == expected_nodes, f"{name}: nodes tidak sesuai")
+
+    expect(
+        topology["summary"].get("max_fan_in") == 2,
+        f"{name}: max_fan_in harus 2"
+    )
+
+    expect(
+        topology["summary"].get("max_fan_out") == 1,
+        f"{name}: max_fan_out harus 1"
+    )
+
+    nodes_by_id = {node["id"]: node for node in topology.get("nodes", [])}
+
+    a_id = f"{project}/src/a.ts"
+    b_id = f"{project}/src/b.ts"
+    c_id = f"{project}/src/c.ts"
+    d_id = f"{project}/src/d.ts"
+
+    a_node = nodes_by_id.get(a_id, {})
+    b_node = nodes_by_id.get(b_id, {})
+    c_node = nodes_by_id.get(c_id, {})
+    d_node = nodes_by_id.get(d_id, {})
+
+    expect(a_node.get("fan_in") == 2, f"{name}: fan_in a.ts harus 2")
+    expect(a_node.get("fan_out") == 1, f"{name}: fan_out a.ts harus 1")
+    expect(
+        a_node.get("direct_dependents_count") == 2,
+        f"{name}: direct_dependents_count a.ts harus 2"
+    )
+
+    expect(d_node.get("fan_in") == 1, f"{name}: fan_in d.ts harus 1")
+    expect(d_node.get("fan_out") == 0, f"{name}: fan_out d.ts harus 0")
+
+    expect(b_node.get("fan_in") == 0, f"{name}: fan_in b.ts harus 0")
+    expect(b_node.get("fan_out") == 1, f"{name}: fan_out b.ts harus 1")
+
+    expect(c_node.get("fan_in") == 0, f"{name}: fan_in c.ts harus 0")
+    expect(c_node.get("fan_out") == 1, f"{name}: fan_out c.ts harus 1")
+
+    impact_a = file_scanner.get_impacted_files(a_id, topology=topology)
+
+    expect(
+        impact_a.get("target_fan_in") == 2,
+        f"{name}: target_fan_in a.ts harus 2"
+    )
+
+    expect(
+        impact_a.get("target_fan_out") == 1,
+        f"{name}: target_fan_out a.ts harus 1"
+    )
+
+    expect(
+        impact_a.get("target_direct_dependents_count") == 2,
+        f"{name}: target_direct_dependents_count a.ts harus 2"
+    )
+
+
+def test_f11_change_risk_advisory():
+    name = "F11"
+    project = "fixtures_min/f11_change_risk_advisory/project"
+    topology = file_scanner.scan_topology(path=project)
+    require_trust_layer(topology, name)
+
+    expected_nodes = {
+        f"{project}/src/main.ts",
+        f"{project}/src/server.ts",
+        f"{project}/src/app.ts",
+        f"{project}/src/util.ts",
+        f"{project}/src/isolated.ts",
+    }
+
+    expect(topology["summary"]["total_nodes"] == 5, f"{name}: total_nodes harus 5")
+    expect(topology["summary"]["total_edges"] == 3, f"{name}: total_edges harus 3")
+    expect(node_ids(topology) == expected_nodes, f"{name}: nodes tidak sesuai")
+
+    app_id = f"{project}/src/app.ts"
+    util_id = f"{project}/src/util.ts"
+    isolated_id = f"{project}/src/isolated.ts"
+    main_id = f"{project}/src/main.ts"
+    server_id = f"{project}/src/server.ts"
+
+    impact_app = file_scanner.get_impacted_files(app_id, topology=topology)
+
+    expect(
+        impact_app.get("change_risk_level") == "high",
+        f"{name}: app.ts harus berisiko high"
+    )
+
+    expect(
+        set(impact_app.get("change_risk_reasons", [])) == {
+            "impacts_entrypoints",
+            "high_fan_in",
+        },
+        f"{name}: alasan risiko app.ts harus impacts_entrypoints dan high_fan_in"
+    )
+
+    expect(
+        set(impact_app.get("affected_entrypoints", [])) == {main_id, server_id},
+        f"{name}: app.ts harus berdampak ke main.ts dan server.ts"
+    )
+
+    impact_util = file_scanner.get_impacted_files(util_id, topology=topology)
+
+    expect(
+        impact_util.get("change_risk_level") == "medium",
+        f"{name}: util.ts harus berisiko medium"
+    )
+
+    expect(
+        "impacts_entrypoints" in impact_util.get("change_risk_reasons", []),
+        f"{name}: util.ts harus memiliki alasan impacts_entrypoints"
+    )
+
+    impact_isolated = file_scanner.get_impacted_files(isolated_id, topology=topology)
+
+    expect(
+        impact_isolated.get("change_risk_level") == "low",
+        f"{name}: isolated.ts harus berisiko low"
+    )
+
+    expect(
+        impact_isolated.get("change_risk_reasons") == ["isolated"],
+        f"{name}: isolated.ts harus memiliki alasan isolated"
+    )
+
+    expect(
+        impact_isolated.get("affected_entrypoints") == [],
+        f"{name}: isolated.ts tidak boleh berdampak ke entrypoint"
+    )
+
+
+def test_f12_unreferenced_files():
+    name = "F12"
+    project = "fixtures_min/f12_unreferenced_files/project"
+    topology = file_scanner.scan_topology(path=project)
+    require_trust_layer(topology, name)
+
+    expected_nodes = {
+        f"{project}/src/main.ts",
+        f"{project}/src/app.ts",
+        f"{project}/src/util.ts",
+        f"{project}/src/unused.ts",
+        f"{project}/src/app.spec.ts",
+    }
+
+    expect(topology["summary"]["total_nodes"] == 5, f"{name}: total_nodes harus 5")
+    expect(topology["summary"]["total_edges"] == 2, f"{name}: total_edges harus 2")
+    expect(topology["summary"]["unresolved_import_count"] == 0, f"{name}: unresolved harus 0")
+    expect(node_ids(topology) == expected_nodes, f"{name}: nodes tidak sesuai")
+
+    policy = topology.get("meta", {}).get("policy", {})
+    expect(
+        policy.get("mode") == "informational_only",
+        f"{name}: policy mode harus informational_only"
+    )
+    expect(
+        policy.get("blocking") is False,
+        f"{name}: tool tidak boleh blocking"
+    )
+    expect(
+        policy.get("provides_change_recommendations") is False,
+        f"{name}: tool tidak boleh memberikan rekomendasi perubahan"
+    )
+
+    expect(
+        topology["summary"].get("test_file_count") == 1,
+        f"{name}: test_file_count harus 1"
+    )
+
+    expect(
+        topology["summary"].get("unreferenced_file_count") == 1,
+        f"{name}: unreferenced_file_count harus 1"
+    )
+
+    unreferenced = topology.get("diagnostics", {}).get("unreferenced_files", [])
+    unreferenced_ids = [item.get("id") for item in unreferenced]
+
+    expect(
+        unreferenced_ids == [f"{project}/src/unused.ts"],
+        f"{name}: hanya unused.ts yang boleh masuk unreferenced_files"
+    )
+
+    nodes_by_id = {node["id"]: node for node in topology.get("nodes", [])}
+
+    expect(
+        nodes_by_id.get(f"{project}/src/app.spec.ts", {}).get("is_test") is True,
+        f"{name}: app.spec.ts harus ditandai sebagai test"
+    )
+
+    expect(
+        nodes_by_id.get(f"{project}/src/main.ts", {}).get("is_entrypoint") is True,
+        f"{name}: main.ts harus ditandai sebagai entrypoint"
+    )
+
+    impact_unused = file_scanner.get_impacted_files(
+        f"{project}/src/unused.ts",
+        topology=topology
+    )
+
+    expect(
+        impact_unused.get("change_risk_level") == "low",
+        f"{name}: unused.ts harus memiliki change_risk_level low"
+    )
+
+    expect(
+        impact_unused.get("target_is_test") is False,
+        f"{name}: unused.ts bukan file test"
+    )
+
+    expect(
+        impact_unused.get("affected_entrypoints") == [],
+        f"{name}: unused.ts tidak berdampak ke entrypoint"
+    )
+
+
+def test_f13_multi_root():
+    name = "F13"
+    base = "fixtures_min/f13_multi_root"
+    root_a = f"{base}/root_a"
+    root_b = f"{base}/root_b"
+
+    topology = file_scanner.scan_topology(path=[root_a, root_b])
+    require_trust_layer(topology, name)
+
+    expected_nodes = {
+        f"{base}/root_a/a.ts",
+        f"{base}/root_b/b.ts",
+        f"{base}/root_b/c.ts",
+    }
+
+    expected_edges = {
+        (f"{base}/root_a/a.ts", f"{base}/root_b/b.ts"),
+        (f"{base}/root_b/c.ts", f"{base}/root_b/b.ts"),
+    }
+
+    expect(topology["summary"]["total_nodes"] == 3, f"{name}: total_nodes harus 3")
+    expect(topology["summary"]["total_edges"] == 2, f"{name}: total_edges harus 2")
+    expect(topology["summary"]["unresolved_import_count"] == 0, f"{name}: unresolved harus 0")
+    expect(node_ids(topology) == expected_nodes, f"{name}: nodes tidak sesuai")
+    expect(edge_pairs(topology) == expected_edges, f"{name}: edges tidak sesuai")
+
+    expect(
+        topology.get("meta", {}).get("scan_mode") == "multi-root",
+        f"{name}: scan_mode harus multi-root"
+    )
+
+    expect(
+        topology.get("meta", {}).get("roots") == [root_a, root_b],
+        f"{name}: roots harus berisi root_a dan root_b"
+    )
+
+    nodes_by_id = {node["id"]: node for node in topology.get("nodes", [])}
+    b_node = nodes_by_id.get(f"{base}/root_b/b.ts", {})
+
+    expect(b_node.get("fan_in") == 2, f"{name}: fan_in b.ts harus 2")
+
+    topology_csv = file_scanner.scan_topology(path=f"{root_a},{root_b}")
+    expect(
+        node_ids(topology_csv) == expected_nodes,
+        f"{name}: comma-separated roots harus menghasilkan nodes yang sama"
+    )
+    expect(
+        topology_csv["summary"]["unresolved_import_count"] == 0,
+        f"{name}: comma-separated roots harus tetap resolve"
+    )
+
+
+def test_f14_file_outline():
+    name = "F14"
+    project = "fixtures_min/f14_outline/project"
+    target = f"{project}/src/sample.ts"
+
+    outline = file_scanner.get_file_outline(target)
+
+    expect(outline.get("exists") is True, f"{name}: outline harus exists")
+
+    expect(
+        "./util" in outline.get("imports", []),
+        f"{name}: import ./util harus terlihat"
+    )
+
+    expect(
+        "some-lib" in outline.get("external_imports", []),
+        f"{name}: external import harus terlihat"
+    )
+
+    expected_exports = {
+        "Sample",
+        "SampleId",
+        "sampleName",
+        "sampleFunction",
+        "SampleClass",
+    }
+
+    expect(
+        set(outline.get("exports", [])) == expected_exports,
+        f"{name}: exports tidak sesuai"
+    )
+
+    kinds = {item.get("kind") for item in outline.get("outline", [])}
+
+    expect(
+        {"interface", "type", "const", "function", "class"} <= kinds,
+        f"{name}: kinds outline tidak lengkap"
+    )
+
+
+def test_f15_alias_paths():
+    name = "F15"
+    project = "fixtures_min/f15_alias_paths/project"
+
+    topology = file_scanner.scan_topology(path=project)
+    require_trust_layer(topology, name)
+
+    expected_nodes = {
+        f"{project}/src/core/logger.ts",
+        f"{project}/src/app/app.ts",
+    }
+
+    expected_edges = {
+        (f"{project}/src/app/app.ts", f"{project}/src/core/logger.ts"),
+    }
+
+    expect(topology["summary"]["total_nodes"] == 2, f"{name}: total_nodes harus 2")
+    expect(topology["summary"]["total_edges"] == 1, f"{name}: total_edges harus 1")
+    expect(topology["summary"]["unresolved_import_count"] == 0, f"{name}: unresolved harus 0")
+    expect(node_ids(topology) == expected_nodes, f"{name}: nodes tidak sesuai")
+    expect(edge_pairs(topology) == expected_edges, f"{name}: edges tidak sesuai")
+
+    expect(
+        topology.get("meta", {}).get("alias_rules_count", 0) >= 1,
+        f"{name}: alias_rules_count harus >= 1"
+    )
+
+    if topology.get("edges"):
+        edge = topology["edges"][0]
+        expect(
+            edge.get("method") == "alias_match",
+            f"{name}: edge alias harus punya method alias_match"
+        )
+
+    external_raw_imports = {
+        item.get("raw_import")
+        for item in topology.get("diagnostics", {}).get("external_imports", [])
+    }
+
+    expect(
+        "some-lib" in external_raw_imports,
+        f"{name}: some-lib harus tetap dicatat sebagai external"
+    )
+
+
+def test_f16_file_brief():
+    name = "F16"
+    project = "fixtures_min/f16_file_brief/project"
+    target_app = f"{project}/src/app.ts"
+    target_util = f"{project}/src/util.ts"
+
+    brief_app = file_scanner.get_file_brief(target_app, path=project)
+
+    expect(brief_app.get("exists") is True, f"{name}: brief app.ts harus exists")
+    expect(brief_app.get("outline") is not None, f"{name}: outline harus ada")
+    expect(brief_app.get("impact") is not None, f"{name}: impact harus ada")
+
+    # Validasi Outline
+    expect(
+        "runApp" in brief_app["outline"].get("exports", []),
+        f"{name}: exports harus memuat runApp"
+    )
+
+    # Validasi Impact (app.ts diimpor main.ts -> entrypoint)
+    expect(
+        brief_app["impact"]["change_risk_level"] in ("medium", "high"),
+        f"{name}: risk level app.ts harus medium/high"
+    )
+    expect(
+        len(brief_app["impact"]["affected_entrypoints"]) > 0,
+        f"{name}: app.ts harus berdampak ke entrypoint"
+    )
+
+    brief_util = file_scanner.get_file_brief(target_util, path=project)
+
+    # Validasi Downstream Count (util diimpor app, app diimpor main)
+    expect(
+        brief_util["impact"]["downstream_count"] == 2,
+        f"{name}: downstream_count util.ts harus 2 (app dan main)"
+    )
+
+
+def test_f17_async_waterfall():
+    name = "F17"
+    project = "fixtures_min/f17_async_waterfall/project"
+    target = f"{project}/src/service.ts"
+
+    import importlib.util
+    detector_path = ROOT / "async_waterfall_detector.py"
+    spec = importlib.util.spec_from_file_location(
+        "async_waterfall_detector",
+        str(detector_path)
+    )
+    detector = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(detector)
+
+    result = detector.analyze_file(target)
+
+    expect(result.get("exists") is True, f"{name}: file harus exists")
+    expect(result.get("is_async_file") is True, f"{name}: file harus terdeteksi async")
+    expect(result["summary"]["total_findings"] >= 1, f"{name}: harus ada findings")
+    expect(
+        result["summary"]["sequential_awaits"] >= 1 or result["summary"]["await_in_loops"] >= 1,
+        f"{name}: harus deteksi sequential await atau await in loop"
+    )
+
+
+def test_f18_deopt_checker():
+    name = "F18"
+    project = "fixtures_min/f18_deopt_checker/project"
+    target = f"{project}/src/service.ts"
+
+    import importlib.util
+    checker_path = ROOT / "deopt_checker.py"
+    spec = importlib.util.spec_from_file_location(
+        "deopt_checker",
+        str(checker_path)
+    )
+    checker = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(checker)
+
+    result = checker.analyze_file(target)
+
+    expect(result.get("exists") is True, f"{name}: file harus exists")
+    expect(result["summary"]["total_findings"] >= 2, f"{name}: harus ada minimal 2 findings (delete, eval)")
+    expect(result["summary"]["by_type"]["delete_operator"] >= 1, f"{name}: harus deteksi delete operator")
+    expect(result["summary"]["by_type"]["eval_usage"] >= 1, f"{name}: harus deteksi eval usage")
+
+
+def test_f19_gc_pressure():
+    name = "F19"
+    project = "fixtures_min/f19_gc_pressure/project"
+    target = f"{project}/src/processor.ts"
+
+    import importlib.util
+    analyzer_path = ROOT / "gc_pressure_analyzer.py"
+    spec = importlib.util.spec_from_file_location(
+        "gc_pressure_analyzer",
+        str(analyzer_path)
+    )
+    analyzer = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(analyzer)
+
+    result = analyzer.analyze_file(target)
+
+    expect(result.get("exists") is True, f"{name}: file harus exists")
+    expect(result["summary"]["total_findings"] >= 3, f"{name}: harus ada minimal 3 findings")
+    expect(result["summary"]["by_type"]["json_in_loop"] >= 1, f"{name}: harus deteksi JSON.parse di loop")
+    expect(result["summary"]["by_type"]["uncleared_timer"] >= 1, f"{name}: harus deteksi uncleared timer")
+
+
+def test_f20_cache_audit():
+    name = "F20"
+    project = "fixtures_min/f20_cache_audit/project"
+    target = f"{project}/src/cache.service.ts"
+
+    import importlib.util
+    auditor_path = ROOT / "cache_auditor.py"
+    spec = importlib.util.spec_from_file_location(
+        "cache_auditor",
+        str(auditor_path)
+    )
+    auditor = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(auditor)
+
+    result = auditor.analyze_file(target)
+
+    expect(result.get("exists") is True, f"{name}: file harus exists")
+    expect(result["summary"]["total_findings"] >= 3, f"{name}: harus ada minimal 3 findings")
+    expect(
+        result["summary"]["by_type"]["nondeterministic_cache_key"] >= 1,
+        f"{name}: harus deteksi nondeterministic key (Date.now)"
+    )
+    expect(
+        result["summary"]["by_type"]["unbounded_cache"] >= 1,
+        f"{name}: harus deteksi unbounded cache"
+    )
+
+
+def test_f21_type_isomorphism():
+    name = "F21"
+    project = "fixtures_min/f21_type_isomorphism/project"
+    target = f"{project}/src/types.ts"
+
+    import importlib.util
+    observer_path = ROOT / "type_isomorphism_observer.py"
+    spec = importlib.util.spec_from_file_location(
+        "type_isomorphism_observer",
+        str(observer_path)
+    )
+    observer = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(observer)
+
+    result = observer.observe_isomorphisms_in_file(target)
+
+    expect(result.get("exists") is True, f"{name}: file harus exists")
+    expect(
+        result["summary"]["total_shapes"] == 5,
+        f"{name}: harus ada 5 type shapes"
+    )
+    expect(
+        result["summary"]["isomorphic_pair_count"] == 2,
+        f"{name}: harus ada 2 pasangan isomorfik"
+    )
+
+    pair_names = set()
+    for pair in result.get("isomorphic_pairs", []):
+        pair_names.add(
+            (pair["space_a"]["name"], pair["space_b"]["name"])
+        )
+
+    expect(
+        ("UserDTO", "UserViewModel") in pair_names,
+        f"{name}: UserDTO dan UserViewModel harus isomorfik"
+    )
+
+    expect(
+        ("Product", "ProductAlias") in pair_names,
+        f"{name}: Product dan ProductAlias harus isomorfik"
+    )
+
+    # Order tidak boleh isomorfik dengan yang lain
+    for pair in result.get("isomorphic_pairs", []):
+        expect(
+            pair["space_a"]["name"] != "Order"
+            and pair["space_b"]["name"] != "Order",
+            f"{name}: Order tidak boleh isomorfik dengan type lain"
+        )
+
+
+def test_f22_boundary_sheaf():
+    name = "F22"
+    project = "fixtures_min/f22_boundary_sheaf/project"
+    scan_root = f"{project}/src"
+
+    import importlib.util
+    checker_path = ROOT / "boundary_sheaf_checker.py"
+    spec = importlib.util.spec_from_file_location(
+        "boundary_sheaf_checker",
+        str(checker_path)
+    )
+    checker = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(checker)
+
+    result = checker.analyze_boundaries(scan_root)
+
+    expect(
+        result["summary"]["total_boundaries"] >= 2,
+        f"{name}: harus ada minimal 2 boundaries"
+    )
+
+    expect(
+        result["summary"]["total_obstructions"] >= 1,
+        f"{name}: harus ada minimal 1 obstruction"
+    )
+
+    # Cek boundary violation: app.component.ts bypass barrel core
+    violations = [
+        f for f in result["obstructions"]
+        if f["type"] == "boundary_violation"
+    ]
+    expect(
+        len(violations) >= 1,
+        f"{name}: harus deteksi boundary violation (bypass barrel)"
+    )
+
+    # Cek section conflict: CoreConfig beda shape di app vs core
+    conflicts = [
+        f for f in result["obstructions"]
+        if f["type"] == "section_conflict"
+    ]
+    expect(
+        len(conflicts) >= 1,
+        f"{name}: harus deteksi section conflict (CoreConfig beda shape)"
+    )
+
+    if conflicts:
+        conflict = conflicts[0]
+        expect(
+            conflict["type_name"] == "CoreConfig",
+            f"{name}: conflict harus pada type CoreConfig"
+        )
+
+
+def test_f23_sheaf_precision():
+    name = "F23"
+    project = "fixtures_min/f23_sheaf_precision/project"
+    scan_root = f"{project}/src"
+
+    import importlib.util
+    checker_path = ROOT / "boundary_sheaf_checker.py"
+    spec = importlib.util.spec_from_file_location(
+        "boundary_sheaf_checker",
+        str(checker_path)
+    )
+    checker = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(checker)
+
+    result = checker.analyze_boundaries(scan_root)
+
+    # Entrypoint main.ts mengimpor src/app/app.ts TANPA barrel.
+    # Ini harus TIDAK dilaporkan sebagai boundary_violation.
+    violations = [
+        f for f in result["obstructions"]
+        if f["type"] == "boundary_violation"
+    ]
+    expect(
+        len(violations) == 0,
+        f"{name}: entrypoint + no-barrel tidak boleh jadi boundary_violation"
+    )
+
+    # Tapi boundary tanpa public API tetap dicatat sebagai observasi low.
+    no_api = [
+        f for f in result["obstructions"]
+        if f["type"] == "boundary_without_public_api"
+    ]
+    expect(
+        len(no_api) >= 1,
+        f"{name}: boundary tanpa barrel harus dicatat sebagai observasi"
+    )
+
+
+def test_f24_homotopy_path():
+    name = "F24"
+    project = "fixtures_min/f24_homotopy_path/project"
+    scan_root = f"{project}/src"
+
+    import importlib.util
+    checker_path = ROOT / "homotopy_path_observer.py"
+    spec = importlib.util.spec_from_file_location(
+        "homotopy_path_observer",
+        str(checker_path)
+    )
+    observer = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(observer)
+
+    result = observer.observe_homotopy_paths(scan_root)
+
+    expect(
+        result["total_files"] == 5,
+        f"{name}: harus ada 5 file"
+    )
+
+    # Cek diamond: a -> b -> d dan a -> c -> d
+    diamonds = [
+        f for f in result["obstructions"]
+        if f["type"] == "diamond_dependency"
+    ]
+    expect(
+        len(diamonds) >= 1,
+        f"{name}: harus deteksi diamond dependency (a->b->d, a->c->d)"
+    )
+
+    if diamonds:
+        diamond = diamonds[0]
+        expect(
+            diamond["convergence"].endswith("d.ts"),
+            f"{name}: diamond harus berkonvergensi di d.ts"
+        )
+        expect(
+            diamond["source"].endswith("a.ts"),
+            f"{name}: diamond harus bersumber dari a.ts"
+        )
+
+    # Cek mergeable import: a.ts mengimpor ./util dua kali
+    mergeable = [
+        f for f in result["obstructions"]
+        if f["type"] == "mergeable_import"
+    ]
+    expect(
+        len(mergeable) >= 1,
+        f"{name}: harus deteksi mergeable import (./util diimpor 2x)"
+    )
+
+
+def test_f25_topological_synthesis():
+    name = "F25"
+    project = "fixtures_min/f25_synthesis/project"
+    scan_root = f"{project}/src"
+
+    import importlib.util
+    checker_path = ROOT / "topological_integrity_orchestrator.py"
+    spec = importlib.util.spec_from_file_location(
+        "topological_integrity_orchestrator",
+        str(checker_path)
+    )
+    orchestrator = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(orchestrator)
+
+    result = orchestrator.synthesize_topological_integrity(scan_root)
+
+    # Verifikasi struktur dasar
+    expect(
+        result.get("schema_version") == "2.3.0-synthesis",
+        f"{name}: schema_version harus 2.3.0-synthesis"
+    )
+
+    expect(
+        "unified_summary" in result,
+        f"{name}: harus ada unified_summary"
+    )
+
+    expect(
+        "stages" in result,
+        f"{name}: harus ada stages"
+    )
+
+    # Verifikasi ketiga stage tersedia
+    expect(
+        result["generated_stages"]["type_isomorphism"] is True,
+        f"{name}: Stage 1 harus tersedia"
+    )
+    expect(
+        result["generated_stages"]["boundary_sheaf"] is True,
+        f"{name}: Stage 2 harus tersedia"
+    )
+    expect(
+        result["generated_stages"]["homotopy_paths"] is True,
+        f"{name}: Stage 3 harus tersedia"
+    )
+
+    # Verifikasi health score ada dan dalam rentang valid
+    health = result["unified_summary"].get("topological_health_score")
+    expect(
+        health is not None and 0.0 <= health <= 1.0,
+        f"{name}: health score harus dalam rentang [0, 1]"
+    )
+
+    # Fixture ini punya diamond (a->b->d, a->c->d), jadi Stage 3 harus deteksi
+    expect(
+        result["unified_summary"]["total_findings"] >= 1,
+        f"{name}: harus ada minimal 1 finding (diamond dari fixture)"
+    )
+
+    # Verifikasi total_files terisi
+    expect(
+        result["unified_summary"]["total_files"] == 4,
+        f"{name}: total_files harus 4"
+    )
+
+
+def test_f26_topological_manifold():
+    name = "F26"
+    project = "fixtures_min/f26_manifold/project"
+    scan_root = f"{project}/src"
+
+    import importlib.util
+    checker_path = ROOT / "topological_manifold_builder.py"
+    spec = importlib.util.spec_from_file_location(
+        "topological_manifold_builder",
+        str(checker_path)
+    )
+    builder = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(builder)
+
+    result = builder.build_topological_manifold(scan_root)
+
+    expect(
+        result["manifold"]["vertex_count"] == 3,
+        f"{name}: harus ada 3 vertices"
+    )
+    expect(
+        result["manifold"]["edge_count"] == 3,
+        f"{name}: harus ada 3 edges"
+    )
+
+    betti = result["manifold"]["betti_numbers"]
+    expect(
+        betti["beta_0"] == 1,
+        f"{name}: β₀ harus 1 (terhubung penuh)"
+    )
+
+    expect(
+        "invariant_vector" in result,
+        f"{name}: harus ada invariant_vector"
+    )
+    expect(
+        "summary" in result,
+        f"{name}: harus ada summary"
+    )
+
+
+def test_f27_invariant_encoder():
+    name = "F27"
+    project = "fixtures_min/f27_encoder/project"
+    scan_root = f"{project}/src"
+
+    import importlib.util
+    checker_path = ROOT / "invariant_encoder.py"
+    spec = importlib.util.spec_from_file_location(
+        "invariant_encoder",
+        str(checker_path)
+    )
+    encoder = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(encoder)
+
+    result = encoder.encode_topological_invariants(scan_root)
+
+    expect(result.get("available") is True, f"{name}: encoder harus available")
+
+    fingerprint = result.get("topological_fingerprint", {})
+
+    hash1 = fingerprint.get("signature_hash", "")
+    result2 = encoder.encode_topological_invariants(scan_root)
+    hash2 = result2.get("topological_fingerprint", {}).get("signature_hash", "")
+    expect(hash1 == hash2 and hash1 != "", f"{name}: signature hash harus deterministik")
+    expect(hash1.startswith("sha256:"), f"{name}: hash harus prefix sha256")
+
+    for key, value in fingerprint.get("normalized_vector", {}).items():
+        expect(0.0 <= value <= 1.0, f"{name}: {key} harus dalam [0,1]")
+
+    complexity = fingerprint.get("complexity_score", -1)
+    expect(0.0 <= complexity <= 1.0, f"{name}: complexity harus dalam [0,1]")
+
+    expect(
+        fingerprint.get("structural_archetype") == "tree_like",
+        f"{name}: archetype harus tree_like untuk struktur pohon"
+    )
+
+    context_block = result.get("context_block", "")
+    expect("[TOPOLOGICAL FINGERPRINT]" in context_block, f"{name}: context block harus ada")
+    expect(hash1 in context_block, f"{name}: context block harus berisi signature")
+
+
+def test_f28_decoder_steering():
+    name = "F28"
+    project = "fixtures_min/f28_steering/project"
+    scan_root = f"{project}/src"
+    baseline_path = f"{project}/baseline/topological_baseline.json"
+
+    import importlib.util
+    checker_path = ROOT / "decoder_steering.py"
+    spec = importlib.util.spec_from_file_location(
+        "decoder_steering",
+        str(checker_path)
+    )
+    steering = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(steering)
+
+    # Step 1: Establish baseline
+    establish_result = steering.establish_baseline(scan_root, baseline_path)
+    expect(
+        establish_result.get("available") is True,
+        f"{name}: establish baseline harus berhasil"
+    )
+
+    # Step 2: Steer dengan baseline yang baru dibuat
+    steer_result = steering.steer_decoder(scan_root, baseline_path)
+    expect(
+        steer_result.get("available") is True,
+        f"{name}: steer harus available"
+    )
+
+    # Baseline harus terdeteksi
+    expect(
+        steer_result["baseline"]["exists"] is True,
+        f"{name}: baseline harus terdeteksi"
+    )
+
+    # Tidak ada drift karena belum ada perubahan
+    drift = steer_result.get("drift_analysis")
+    expect(drift is not None, f"{name}: drift_analysis harus ada")
+    expect(
+        drift["has_drift"] is False,
+        f"{name}: tidak boleh ada drift setelah establish"
+    )
+    expect(
+        drift["topology_changed"] is False,
+        f"{name}: topologi tidak boleh berubah"
+    )
+
+    # Steering signals harus ada
+    signals = steer_result.get("steering_signals")
+    expect(signals is not None, f"{name}: steering_signals harus ada")
+    expect(
+        signals["reasoning_strategy"] == "hierarchical_traversal",
+        f"{name}: fixture tree harus dapat strategi hierarchical_traversal"
+    )
+    expect(
+        signals["reasoning_budget"] in ("low", "medium", "high"),
+        f"{name}: reasoning_budget harus valid"
+    )
+    expect(
+        signals["regrounding_needed"] is False,
+        f"{name}: tidak perlu regrounding saat topologi stabil"
+    )
+
+    # Steering prompt block harus ada dan berisi signature
+    prompt_block = steer_result.get("steering_prompt_block", "")
+    expect(
+        "[TOPOLOGICAL STEERING SIGNAL]" in prompt_block,
+        f"{name}: prompt block harus ada"
+    )
+    expect(
+        steer_result["current_fingerprint"]["signature_hash"] in prompt_block,
+        f"{name}: prompt block harus berisi signature"
+    )
+
+    # Cleanup baseline
+    import os as _os
+    if _os.path.isfile(baseline_path):
+        _os.remove(baseline_path)
+
+
+def test_f29_archetype_calibration():
+    name = "F29"
+    project = "fixtures_min/f29_archetype_calibration/project"
+    scan_root = f"{project}/src"
+
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "invariant_encoder",
+        str(ROOT / "invariant_encoder.py")
+    )
+    encoder = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(encoder)
+
+    result = encoder.encode_topological_invariants(scan_root)
+    fingerprint = result.get("topological_fingerprint", {})
+    archetype = fingerprint.get("structural_archetype", "")
+
+    expect(
+        archetype != "dense_mesh",
+        f"{name}: fragmented sparse cyclic harus BUKAN dense_mesh"
+    )
+    expect(
+        archetype == "fragmented_sparse_cyclic",
+        f"{name}: archetype harus fragmented_sparse_cyclic, dapat '{archetype}'"
+    )
+
+    betti = result.get("summary", {}).get("betti_numbers", {})
+    expect(betti.get("beta_0") == 2, f"{name}: beta_0 harus 2 (dua komponen)")
+    expect(betti.get("beta_1") == 1, f"{name}: beta_1 harus 1 (satu cycle)")
+
+
+def test_f30_complexity_calibration():
+    name = "F30"
+    project = "fixtures_min/f30_complexity_calibration/project"
+    scan_root = f"{project}/src"
+
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "invariant_encoder",
+        str(ROOT / "invariant_encoder.py")
+    )
+    encoder = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(encoder)
+
+    result = encoder.encode_topological_invariants(scan_root)
+    fingerprint = result.get("topological_fingerprint", {})
+    normalized = fingerprint.get("normalized_vector", {})
+
+    # n_avg_degree harus ada dan dalam [0,1]
+    expect(
+        "n_avg_degree" in normalized,
+        f"{name}: n_avg_degree harus ada di normalized_vector"
+    )
+    expect(
+        0.0 <= normalized.get("n_avg_degree", -1) <= 1.0,
+        f"{name}: n_avg_degree harus dalam [0,1]"
+    )
+
+    # n_edge_density harus sudah dihapus (digantikan n_avg_degree)
+    expect(
+        "n_edge_density" not in normalized,
+        f"{name}: n_edge_density harus sudah digantikan n_avg_degree"
+    )
+
+    # complexity_score harus dalam [0,1]
+    complexity = fingerprint.get("complexity_score", -1)
+    expect(
+        0.0 <= complexity <= 1.0,
+        f"{name}: complexity_score harus dalam [0,1]"
+    )
+
+    # signature_hash harus tetap ada
+    signature = fingerprint.get("signature_hash", "")
+    expect(
+        signature.startswith("sha256:"),
+        f"{name}: signature_hash harus tetap ada"
+    )
+
+
+def main():
+    write_fixtures()
+
+    tests = [
+        test_f01_basic_relative,
+        test_f02_extensionless,
+        test_f04_tsx_jsx,
+        test_f05_unresolved,
+        test_f09_circular,
+        test_f08_entrypoint,
+        test_f10_graph_metrics,
+        test_f11_change_risk_advisory,
+        test_f12_unreferenced_files,
+        test_f13_multi_root,
+        test_f14_file_outline,
+        test_f15_alias_paths,
+        test_f16_file_brief,
+        test_f17_async_waterfall,
+        test_f18_deopt_checker,
+        test_f19_gc_pressure,
+        test_f20_cache_audit,
+        test_f21_type_isomorphism,
+        test_f22_boundary_sheaf,
+        test_f23_sheaf_precision,
+        test_f24_homotopy_path,
+        test_f25_topological_synthesis,
+        test_f26_topological_manifold,
+        test_f27_invariant_encoder,
+        test_f28_decoder_steering,
+        test_f29_archetype_calibration,
+        test_f30_complexity_calibration,
+    ]
+
+    for test in tests:
+        try:
+            test()
+        except Exception as exc:
+            FAILURES.append(f"{test.__name__}: exception {exc}")
+
+    if FAILURES:
+        print("FAIL")
+        for failure in FAILURES:
+            print(f"- {failure}")
+        sys.exit(1)
+
+    print("PASS: 27 fixture minimal baseline aman")
+
+
+if __name__ == "__main__":
+    main()
