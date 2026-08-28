@@ -5,7 +5,7 @@
 
 > **Schema Version:** 4.0.0-memory
 > **Entry Point:** `tools/ai_studio_tool/hott_kernel.py`
-> **Fixture Baseline:** 30 fixture minimal + 2 portable integration smoke PASS
+> **Fixture Baseline:** 31 fixture minimal + 2 portable integration smoke PASS
 
 ---
 
@@ -100,6 +100,30 @@ Test topology memakai model terpisah bernama
 file `.spec/.test` menuju source dependency dan menghasilkan witness path.
 Nilainya adalah bukti struktural untuk context selection LLM, **bukan** runtime
 statement/branch coverage.
+
+### 2.2A Query-Directed Context sebagai Proyeksi Terukur
+
+Mode `context` memproyeksikan satu snapshot `SharedGraph` menjadi context block
+yang dibatasi budget. File tidak dipilih dengan tebakan tersembunyi: setiap
+ranking membawa komponen skor, graph distance, finding, boundary, dan content
+hash sebagai provenance.
+
+Model seleksinya dinyatakan eksplisit:
+
+```text
+S(v) = target_bonus + 0.45L(v) + 0.25P(v) + 0.20C(v) + 0.10F(v)
+```
+
+- `L`: overlap query dengan path, simbol, atau finding analyzer
+- `P`: `1 / (1 + d)` dari semantic/explicit seed pada underlying graph
+- `C`: degree centrality ternormalisasi
+- `F`: severity finding tertinggi yang terpetakan ke file
+
+Boundary folder membentuk partisi `P`; quotient graph `G/P` meringkas relasi
+antar-modul sebelum file witness dipilih. Skor ini deterministik untuk snapshot
+dan query yang sama, tetapi bukan bukti bahwa file yang diomit pasti tidak relevan.
+Budget token juga merupakan estimasi portabel `ceil(chars/4)`, bukan tokenizer
+khusus suatu model.
 
 ### 2.3 Ide: Memori sebagai Ruang Topologis
 
@@ -210,7 +234,7 @@ Tool ini dibangun di atas 5 pilar teoretis dari Homotopy Type Theory (HoTT):
 │  │ 13 Analyzers    │  │ Store/Recall    │  │ Fiber Init      │    │
 │  │ Synthesis       │  │ Consolidate     │  │ Lift/Descend    │    │
 │  │ Steering        │  │ Compact/Bridge  │  │ Section         │    │
-│  │ Impact/Outline  │  │ Betti Breakdown │  │ Switch          │    │
+│  │ Context/Impact  │  │ Betti Breakdown │  │ Switch          │    │
 │  └────────┬────────┘  └────────┬────────┘  └────────┬────────┘    │
 │           │                    │                    │              │
 │           └────────────────────┼────────────────────┘              │
@@ -230,6 +254,16 @@ Tool ini dibangun di atas 5 pilar teoretis dari Homotopy Type Theory (HoTT):
 | `topo.*` | orphan, entrypoint, circular, risk, test_reachability | Struktur, risiko, dan static test topology |
 | `perf.*` | async, deopt, gc, cache | Performance anti-patterns |
 | `hott.*` | isomorphism, sheaf, homotopy, manifold | Topological invariants |
+
+### 4.2A Context Projection
+
+| Operasi | Fungsi | Evidence |
+|---|---|---|
+| `context <query>` | Pilih subgraph sesuai pertanyaan | lexical overlap + shortest-path + centrality + findings |
+| `--target` | Tetapkan base projection eksplisit | target dan neighborhood hingga `--max-hops` |
+| `--budget-tokens` | Batasi ukuran `context_block` | hard character budget dengan estimasi token transparan |
+| boundary quotient | Kompres graph file menjadi graph modul | cross-boundary edge + witness |
+| content signature | Identitas snapshot source+edge | deteksi context yang sudah stale |
 
 ### 4.3 Memory Domain
 
@@ -308,6 +342,9 @@ python3 tools/ai_studio_tool/hott_kernel.py xsteer src --output summary
 # Sebelum edit file
 python3 tools/ai_studio_tool/hott_kernel.py brief src/app/app.ts src --output summary
 
+# Context prompt terukur untuk pertanyaan developer
+python3 tools/ai_studio_tool/hott_kernel.py context "cache key collision" src --budget-tokens 1200 --output prompt
+
 # Inisialisasi fiber (context management)
 python3 tools/ai_studio_tool/hott_kernel.py fiber init "task" "focus"
 
@@ -329,6 +366,7 @@ hott_kernel.py establish src
 hott_kernel.py impact <file> src
 hott_kernel.py outline <file> src
 hott_kernel.py brief <file> src --output summary
+hott_kernel.py context "<query>" src [--target file[,file]] [--budget-tokens 1200] [--max-hops 2] [--detail outline|source] [--output prompt|summary|full]
 hott_kernel.py analyzers
 ```
 
@@ -413,6 +451,7 @@ tools/ai_studio_tool/
 │   ├── shared_graph.py              # Canonical graph representation
 │   ├── analyzer_registry.py         # Registry & lifecycle management
 │   ├── synthesizer.py               # Invariant encoder & decoder steering
+│   ├── context_optimizer.py         # Query-directed quotient context + budget
 │   ├── safety.py                    # Cycle prevention & Betti validation
 │   ├── deprecation.py               # Standalone deprecation handlers
 │   └── __init__.py                  # Core exports
@@ -487,12 +526,12 @@ Tidak semua hal perlu terhubung. β₀ tinggi bisa valid jika memang domain berb
 |---|---|
 | Total CLI modes | 30+ |
 | Total analyzers | 18 (13 codebase + 5 memory) |
-| Targeted queries | 3 (impact, outline, brief) |
+| Targeted queries | 4 (context, impact, outline, brief) |
 | Cross-domain modes | 3 (xanalyze, xsteer, xcontext) |
 | Memory operations | 12 |
 | Fiber operations | 8 |
 | Safety checks | 2 (cycle prevention, fiber compatibility) |
-| Fixture baseline | 28 tests PASS |
+| Fixture baseline | 31 fixture minimal + 2 portable integration smoke PASS |
 | Betti-preservation | β₁_reasoning = 0 (terjaga di semua operasi) |
 | Zero-dependency | Python 3 stdlib only |
 

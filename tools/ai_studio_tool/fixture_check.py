@@ -519,6 +519,33 @@ FIXTURES = {
     Path("fixtures_min/f33_test_reachability/project/src/orphan.spec.ts"): (
         "export const orphanSpec = true;\n"
     ),
+    # F34 query-directed context projection and boundary quotient
+    Path("fixtures_min/f34_context_optimizer/project/src/orders/pricing.ts"): (
+        "export function calculatePricing(quantity: number) {\n"
+        "  return quantity * 100;\n"
+        "}\n"
+    ),
+    Path("fixtures_min/f34_context_optimizer/project/src/orders/repository.ts"): (
+        "export const orderRepository = new Map<string, number>();\n"
+    ),
+    Path("fixtures_min/f34_context_optimizer/project/src/orders/order.service.ts"): (
+        "import { calculatePricing } from './pricing';\n"
+        "import { orderRepository } from './repository';\n"
+        "export const createOrder = (id: string, quantity: number) => {\n"
+        "  orderRepository.set(id, calculatePricing(quantity));\n"
+        "};\n"
+    ),
+    Path("fixtures_min/f34_context_optimizer/project/src/orders/order.controller.ts"): (
+        "import { createOrder } from './order.service';\n"
+        "export const submitOrder = createOrder;\n"
+    ),
+    Path("fixtures_min/f34_context_optimizer/project/src/orders/order.spec.ts"): (
+        "import { submitOrder } from './order.controller';\n"
+        "export const orderSpec = submitOrder;\n"
+    ),
+    Path("fixtures_min/f34_context_optimizer/project/src/auth/auth.service.ts"): (
+        "export const authenticate = () => true;\n"
+    ),
 }
 
 FAILURES = []
@@ -1806,6 +1833,71 @@ def test_f33_static_test_reachability():
     )
 
 
+def test_f34_context_optimizer():
+    name = "F34"
+    scan_root = "fixtures_min/f34_context_optimizer/project/src"
+    pricing = f"{scan_root}/orders/pricing.ts"
+    order_service = f"{scan_root}/orders/order.service.ts"
+    auth_service = f"{scan_root}/auth/auth.service.ts"
+
+    from core.analyzer_registry import run_analyzers
+    from core.context_optimizer import build_context_pack
+    from core.shared_graph import build_shared_graph
+
+    graph = build_shared_graph(scan_root)
+    analyzer_output = run_analyzers(graph)
+    kwargs = {
+        "query": "pricing calculation",
+        "budget_tokens": 600,
+        "max_hops": 2,
+        "detail": "source",
+        "analyzer_output": analyzer_output,
+    }
+    result = build_context_pack(graph, **kwargs)
+    repeated = build_context_pack(graph, **kwargs)
+
+    selected = result.get("selection", {}).get("selected_paths", [])
+    expect(selected and selected[0] == pricing, f"{name}: pricing.ts harus semantic seed pertama")
+    expect(order_service in selected, f"{name}: neighbor order.service harus masuk context")
+    expect(auth_service not in selected, f"{name}: boundary auth yang tidak relevan harus diomit")
+    expect(
+        selected == repeated.get("selection", {}).get("selected_paths", []),
+        f"{name}: ranking file harus deterministik",
+    )
+    expect(
+        result.get("context_block") == repeated.get("context_block"),
+        f"{name}: prompt context harus deterministik",
+    )
+    expect(
+        result.get("provenance", {}).get("graph_content_signature")
+        == repeated.get("provenance", {}).get("graph_content_signature"),
+        f"{name}: content signature harus deterministik",
+    )
+    budget = result.get("budget", {})
+    expect(budget.get("within_budget") is True, f"{name}: hard budget harus dipatuhi")
+    expect(
+        budget.get("used_chars", 1) <= budget.get("char_budget", 0),
+        f"{name}: context_block tidak boleh melewati character budget",
+    )
+    expect(
+        result.get("provenance", {}).get("optimizer_additional_filesystem_scans") == 0,
+        f"{name}: optimizer harus reuse SharedGraph tanpa rescan",
+    )
+    quotient = result.get("quotient_graph", {}).get("summary", {})
+    expect(quotient.get("quotient_vertex_count") == 2, f"{name}: quotient harus punya orders+auth")
+    expect(
+        quotient.get("relevant_boundary_count") == 1,
+        f"{name}: hanya boundary orders yang relevan",
+    )
+    context_block = result.get("context_block", "")
+    expect("0.45L+0.25P+0.20C+0.10F" in context_block, f"{name}: formula harus transparan")
+    expect("calculatePricing" in context_block, f"{name}: source witness harus masuk context")
+    expect(
+        result.get("model", {}).get("claim_boundary", "").startswith("Ranking is deterministic"),
+        f"{name}: batas klaim ranking harus eksplisit",
+    )
+
+
 def test_f31_memory_topology_betti():
     name = "F31"
     from memory.graph import build_memory_graph_from_data
@@ -1882,6 +1974,27 @@ def test_kernel_wiring_smoke():
         result = _run_kernel(command, target, project)
         expect(result.get("exists") is True, f"KERNEL: {command} harus menemukan target")
 
+    context_result = _run_kernel(
+        "context",
+        "app dependency change",
+        project,
+        "--target",
+        target,
+        "--budget-tokens",
+        "400",
+        "--output",
+        "prompt",
+    )
+    expect(context_result.get("mode") == "context", "KERNEL: mode context harus terhubung")
+    expect(
+        target in context_result.get("selection", {}).get("selected_paths", []),
+        "KERNEL: context harus membawa explicit target",
+    )
+    expect(
+        context_result.get("budget", {}).get("within_budget") is True,
+        "KERNEL: context CLI harus mematuhi budget",
+    )
+
     _run_kernel("steer", project, "--output", "summary")
 
     for args in (
@@ -1927,6 +2040,7 @@ def test_kernel_cli_contract():
     expect(completed.returncode == 0, "CLI: --help harus sukses")
     expect(not help_payload.get("error"), "CLI: --help tidak boleh menjadi error")
     expect("analyze" in help_payload.get("usage", {}), "CLI: help harus memuat analyze")
+    expect("context" in help_payload.get("usage", {}), "CLI: help harus memuat context")
 
     project = "fixtures_min/f16_file_brief/project"
     completed, invalid_analyzer = run_raw(
@@ -1958,6 +2072,32 @@ def test_kernel_cli_contract():
     expect(
         invalid_output.get("error_code") == "invalid_output_mode",
         "CLI: output mode invalid harus ditolak eksplisit",
+    )
+
+    completed, invalid_budget = run_raw(
+        "context",
+        "app dependency",
+        project,
+        "--budget-tokens",
+        "12",
+    )
+    expect(completed.returncode == 2, "CLI: context budget terlalu kecil harus exit code 2")
+    expect(
+        invalid_budget.get("error_code") == "invalid_context_budget",
+        "CLI: context budget invalid harus ditolak eksplisit",
+    )
+
+    completed, missing_target = run_raw(
+        "context",
+        "app dependency",
+        project,
+        "--target",
+        "src/tidak-ada.ts",
+    )
+    expect(completed.returncode == 2, "CLI: explicit target yang hilang harus exit code 2")
+    expect(
+        missing_target.get("error_code") == "context_target_not_found",
+        "CLI: target context yang hilang harus punya error code stabil",
     )
 
     _, empty_analysis = run_raw("analyze", ".", "--output", "summary")
@@ -2009,6 +2149,7 @@ def main():
         test_f31_memory_topology_betti,
         test_f32_reciprocal_cycle_basis,
         test_f33_static_test_reachability,
+        test_f34_context_optimizer,
         test_kernel_wiring_smoke,
         test_kernel_cli_contract,
     ]
@@ -2025,7 +2166,7 @@ def main():
             print(f"- {failure}")
         sys.exit(1)
 
-    print("PASS: 30 fixture minimal + 2 portable integration smoke aman")
+    print("PASS: 31 fixture minimal + 2 portable integration smoke aman")
 
 
 if __name__ == "__main__":

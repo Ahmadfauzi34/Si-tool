@@ -6,7 +6,8 @@ name: ai-studio-hott-kernel
 description: |
   HoTT Kernel 4.0 — Unified Codebase Intelligence + Memory Domain + Fibration
   Context Management. Single entry point (hott_kernel.py) untuk 13 codebase
-  analyzers, memory topology operations, fiber-based context management,
+  analyzers, query-directed context budgeting, memory topology operations,
+  fiber-based context management,
   dan cross-domain steering. Gunakan untuk SEMUA analisis codebase dan
   manajemen memori agent.
 schema_version: 4.0.0-memory
@@ -36,7 +37,7 @@ Kamu adalah **Codebase Intelligence Analyst** dengan kemampuan:
 | Kategori | Modes | Kapan Gunakan |
 |---|---|---|
 | **Codebase Analysis** | `analyze`, `synthesize`, `steer`, `establish` | Memahami struktur codebase |
-| **Targeted Queries** | `impact`, `outline`, `brief` | Sebelum edit file spesifik |
+| **Targeted Queries** | `context`, `impact`, `outline`, `brief` | Pilih evidence lalu drill-down sebelum edit |
 | **Memory Operations** | `memory store/recall/consolidate/compact/bridge` | Kelola memori agent |
 | **Memory Topology** | `memory analyze/steer/establish/drift/betti_breakdown` | Diagnostik memori |
 | **Fiber Operations** | `fiber init/lift/descend/status/section_*/switch/transport/list_archives` | Kelola context window & parallel transport |
@@ -45,6 +46,26 @@ Kamu adalah **Codebase Intelligence Analyst** dengan kemampuan:
 ---
 
 ## 3. WORKFLOW PROTOCOLS
+
+### 3.0 Query-Directed Context (sebelum membaca source secara massal)
+
+```
+STEP 1: Proyeksikan pertanyaan ke SharedGraph
+  → hott_kernel.py context "<pertanyaan developer>" src --budget-tokens 1200 --output prompt
+
+STEP 2: Periksa provenance
+  → BACA: selection.mode, selection.confidence, selected_paths
+  → BACA: graph_content_signature, used_chars, within_budget
+
+STEP 3: Drill-down hanya jika evidence belum cukup
+  → target sudah diketahui:
+    hott_kernel.py context "<pertanyaan>" src --target <file> --max-hops 2 --output prompt
+  → butuh seluruh detail satu file:
+    hott_kernel.py brief <file> src
+
+JANGAN menganggap file yang diomit pasti tidak relevan. Ranking adalah proyeksi
+deterministik untuk efisiensi context, bukan proof of irrelevance.
+```
 
 ### 3.1 Pre-Edit File (WAJIB sebelum edit)
 
@@ -236,6 +257,18 @@ diabaikan untuk β₀/β₁, sehingga β₁ **bukan** jumlah circular import.
 | `high_influence_without_test_path` | File berpengaruh tanpa test witness | Naikkan kehati-hatian sebelum edit |
 | `static_test_reachability_ratio` | Rasio source yang reachable secara statis | Gunakan sebagai sinyal, bukan coverage score |
 
+### 4.2C Reading `context`
+
+| Field | Interpretasi | Action |
+|---|---|---|
+| `selection.mode=query_graph` | Seed berasal dari query path/symbol/finding | Periksa confidence dan selection signals |
+| `selection.mode=explicit_target_graph` | Target menjadi base projection tunggal | Gunakan untuk pekerjaan pada file yang sudah diketahui |
+| `score_components` | `L`, proximity, centrality, finding severity | Audit alasan file dipilih; jangan anggap skor sebagai probabilitas benar |
+| `quotient_graph` | `G/P` berdasarkan boundary SharedGraph | Gunakan untuk memahami hubungan modul secara ringkas |
+| `graph_content_signature` | Hash content seluruh source dan edge | Context lama stale jika signature berubah |
+| `budget.token_count_is_estimate=true` | Estimasi `ceil(chars/4)` | Jangan samakan dengan tokenizer model tertentu |
+| `optimizer_additional_filesystem_scans=0` | Analyzer dan optimizer memakai snapshot sama | Hindari scan/read source berulang yang tidak diperlukan |
+
 ### 4.3 Reading `memory analyze` Output
 
 | Field | Threshold | Interpretasi |
@@ -331,6 +364,7 @@ hott_kernel.py establish src
 hott_kernel.py impact <file> src
 hott_kernel.py outline <file> src
 hott_kernel.py brief <file> src --output summary
+hott_kernel.py context "<query>" src [--target file[,file]] [--budget-tokens 1200] [--max-hops 2] [--detail outline|source] [--output prompt|summary|full]
 hott_kernel.py analyzers
 ```
 
@@ -434,6 +468,7 @@ tools/ai_studio_tool/
 │   ├── shared_graph.py              # Canonical graph representation
 │   ├── analyzer_registry.py         # Registry & lifecycle management
 │   ├── synthesizer.py               # Invariant encoder & decoder steering
+│   ├── context_optimizer.py         # Query-directed quotient context + budget
 │   ├── safety.py                    # Cycle prevention & Betti validation
 │   ├── deprecation.py               # Standalone deprecation handlers
 │   └── __init__.py                  # Core exports
@@ -512,9 +547,10 @@ tools/ai_studio_tool/
 
 ### Sebelum Edit File
 ```
-1. hott_kernel.py brief <file> src --output summary
-2. hott_kernel.py xcontext <file>  (memory context)
-3. Keputusan berdasarkan risk level + memory context
+1. hott_kernel.py context "<task>" src --target <file> --output prompt
+2. hott_kernel.py brief <file> src --output summary  (jika perlu drill-down)
+3. hott_kernel.py xcontext <file>  (memory context)
+4. Keputusan berdasarkan graph evidence + risk + memory context
 ```
 
 ### Setelah Perubahan Besar
