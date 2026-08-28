@@ -109,6 +109,29 @@ def encode_topological_invariants(
     manifold = manifold_result.get("manifold", {})
     betti = manifold.get("betti_numbers", {})
     summary = manifold_result.get("summary", {})
+    cycle_basis = manifold_result.get("cycle_basis", [])
+    cycle_orientation_counts = manifold.get("cycle_orientation_counts", {})
+    topological_model = manifold_result.get("topological_model", {})
+    cycle_semantics = {
+        "model": topological_model.get("name", "dependency_multigraph_1_complex"),
+        "undirected_cycle_rank": betti.get("beta_1", 0),
+        "directed_basis_witnesses": cycle_orientation_counts.get("directed", 0),
+        "mixed_basis_witnesses": cycle_orientation_counts.get("mixed", 0),
+        "cycle_basis_complete": manifold.get("cycle_basis_complete", False),
+        "interpretation": (
+            "beta_1 counts independent cycles after import orientation is ignored; "
+            "use witness orientation or topo.circular for circular-import claims"
+        ),
+        "witnesses": [
+            {
+                "basis_index": item.get("basis_index"),
+                "orientation": item.get("orientation"),
+                "interpretation": item.get("interpretation"),
+                "closed_path": item.get("closed_path", []),
+            }
+            for item in cycle_basis
+        ],
+    }
 
     total_nodes = graph["summary"]["total_files"]
     total_edges = graph["summary"]["total_edges"]
@@ -150,7 +173,22 @@ def encode_topological_invariants(
         f"Archetype: {archetype}\n"
         f"Complexity: {complexity}\n"
         f"Betti: β₀={betti.get('beta_0', 1)}, β₁={betti.get('beta_1', 0)}, β₂={betti.get('beta_2', 0)}\n"
+        f"Cycle Semantics: model={cycle_semantics['model']}, "
+        f"directed_basis={cycle_semantics['directed_basis_witnesses']}, "
+        f"mixed_basis={cycle_semantics['mixed_basis_witnesses']}\n"
+        f"Interpretation: {cycle_semantics['interpretation']}\n"
     )
+    witness_lines = [
+        f"- basis#{item['basis_index']} [{item['orientation']}]: "
+        f"{' -> '.join(item['closed_path'])}"
+        for item in cycle_semantics["witnesses"][:5]
+    ]
+    if witness_lines:
+        context_block += "Cycle Witnesses:\n" + "\n".join(witness_lines) + "\n"
+    if len(cycle_semantics["witnesses"]) > 5:
+        context_block += (
+            f"- ... {len(cycle_semantics['witnesses']) - 5} additional basis witness(es) omitted\n"
+        )
 
     return {
         "available": True,
@@ -160,14 +198,18 @@ def encode_topological_invariants(
             "normalized_vector": normalized_vec,
             "complexity_score": round(complexity, 4),
             "structural_archetype": archetype,
+            "topological_model": cycle_semantics["model"],
+            "cycle_orientation_counts": cycle_orientation_counts,
         },
         "summary": {
             "betti_numbers": betti,
             "total_files": total_nodes,
             "total_edges": total_edges,
             "average_degree": avg_degree,
+            "cycle_semantics": cycle_semantics,
             **summary,
         },
+        "cycle_semantics": cycle_semantics,
         "context_block": context_block,
     }
 
@@ -253,6 +295,7 @@ def steer_decoder(
     complexity = curr_fp.get("complexity_score", 0.5)
     budget = "low" if complexity < 0.3 else ("medium" if complexity < 0.7 else "high")
     regrounding = dist > 0.25
+    cycle_semantics = current.get("cycle_semantics", {})
 
     prompt_block = (
         f"[TOPOLOGICAL STEERING SIGNAL]\n"
@@ -260,6 +303,10 @@ def steer_decoder(
         f"Archetype: {archetype}\n"
         f"Strategy: {strategy}\n"
         f"Budget: {budget}\n"
+        f"Cycle Model: {cycle_semantics.get('model', 'unknown')}\n"
+        f"Cycle Basis: directed={cycle_semantics.get('directed_basis_witnesses', 0)}, "
+        f"mixed={cycle_semantics.get('mixed_basis_witnesses', 0)}\n"
+        f"Cycle Interpretation: {cycle_semantics.get('interpretation', '')}\n"
     )
 
     return {
@@ -281,6 +328,8 @@ def steer_decoder(
             "reasoning_budget": budget,
             "regrounding_needed": regrounding,
         },
+        "summary": current.get("summary"),
+        "cycle_semantics": cycle_semantics,
         "steering_prompt_block": prompt_block,
         "current_fingerprint": curr_fp,
         "baseline_fingerprint": base_fp if has_baseline else None,

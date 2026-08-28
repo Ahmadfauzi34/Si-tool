@@ -213,6 +213,19 @@ STEP 6: Switch Context (Jika Pindah Task)
 | `beta_1_total` > 0 tapi `beta_1_reasoning` = 0 | Hanya structural | AMAN, tidak perlu action |
 | `reasoning_percentage` = 0 | Tidak ada circular reasoning | Sehat |
 
+### 4.2A Reading Codebase `hott.manifold` Cycles
+
+Codebase Betti memakai model `dependency_multigraph_1_complex`. Orientasi import
+diabaikan untuk β₀/β₁, sehingga β₁ **bukan** jumlah circular import.
+
+| Field | Interpretasi | Action |
+|---|---|---|
+| `topological_model.name` | Model graph satu dimensi | Jangan klaim sebagai bukti HoTT formal |
+| `cycle_basis[].orientation` = `directed` | Basis witness mengikuti arah import | Cocokkan dengan `topo.circular` |
+| `cycle_basis[].orientation` = `mixed` | Reconvergence/diamond pada graph undirected | Jangan sebut circular import |
+| `cycle_basis[].closed_path` | Saksi file/edge untuk β₁ | Gunakan sebagai semantic context LLM |
+| `cycle_basis_complete` = `true` | Jumlah witness sama dengan β₁ | Evidence lengkap untuk basis yang dipilih |
+
 ### 4.3 Reading `memory analyze` Output
 
 | Field | Threshold | Interpretasi |
@@ -395,12 +408,17 @@ python3 tools/ai_studio_tool/fixture_check.py
 
 ## 8. FILE STRUCTURE
 
+`tools/ai_studio_tool/` adalah batas distribusi portabel. Angular/REST demo
+berada di luar folder ini dan hanya boleh bergantung pada kernel, tidak sebaliknya.
+
 ```
 tools/ai_studio_tool/
 |- readme.md
 |- skill.md
 ├── hott_kernel.py                   # Unified Kernel CLI & API Entrypoint
 ├── tools_schema.json                # JSON Tool Declarations
+├── fixture_check.py                 # Self-contained portable regression
+├── fixtures_min/                    # Minimal TS/JS invariant fixtures
 │
 ├── core/                            # Shared Foundation (Layer 0)
 │   ├── shared_graph.py              # Canonical graph representation
@@ -507,4 +525,3 @@ tools/ai_studio_tool/
 ```
 
 ---
-
