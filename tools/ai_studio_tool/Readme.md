@@ -5,7 +5,24 @@
 
 > **Schema Version:** 4.0.0-memory
 > **Entry Point:** `tools/ai_studio_tool/hott_kernel.py`
-> **Fixture Baseline:** 28 tests PASS
+> **Fixture Baseline:** 32 fixture minimal + 2 portable integration smoke PASS
+
+---
+
+## 0. BATAS PRODUK PORTABEL
+
+Folder `tools/ai_studio_tool/` adalah produk yang dibawa ke berbagai proyek.
+Folder Angular `src/`, REST server, dan UI pada repository ini hanya merupakan
+target/corpus pengujian. Arah dependensi harus selalu satu arah:
+
+```text
+Angular/REST demo -> hott_kernel.py
+hott_kernel.py -X-> Angular/REST demo
+```
+
+Menyalin folder `ai_studio_tool` saja harus cukup untuk menjalankan kernel dan
+seluruh fixture internal. Tool tidak memerlukan Node, Angular, atau struktur
+repository demo.
 
 ---
 
@@ -63,6 +80,69 @@ Topologi (khususnya Homotopy Type Theory / HoTT) dipilih sebagai bahasa karena:
 2. **Bisa diukur**: Betti numbers (β₀, β₁, β₂) memberikan metrik kuantitatif
 3. **Bisa dibandingkan**: Signature hash memungkinkan drift detection
 4. **Bisa memandu**: Archetype → reasoning strategy mapping
+
+Istilah HoTT di sini digunakan sebagai **konteks semantik untuk reasoning LLM**,
+bukan sebagai klaim bahwa output adalah pembuktian HoTT formal. Untuk analisis
+codebase, model Betti saat ini adalah `dependency_multigraph_1_complex`:
+
+- vertex = file sumber yang didukung
+- edge = relative import yang berhasil di-resolve
+- β₀ = komponen terhubung pada underlying undirected multigraph
+- β₁ = cycle rank pada underlying undirected multigraph
+- β₂ = 0 secara konstruksi karena model berdimensi satu
+
+Karena orientasi import diabaikan saat menghitung Betti, β₁ tidak identik dengan
+jumlah circular import. `cycle_basis` menyediakan saksi path dan label
+`directed`/`mixed` agar LLM dapat membedakan keduanya.
+
+Test topology memakai model terpisah bernama
+`static_test_import_reachability`. Model ini mengikuti relative import dari
+file `.spec/.test` menuju source dependency dan menghasilkan witness path.
+Nilainya adalah bukti struktural untuk context selection LLM, **bukan** runtime
+statement/branch coverage.
+
+### 2.2A Query-Directed Context sebagai Proyeksi Terukur
+
+Mode `context` memproyeksikan satu snapshot `SharedGraph` menjadi context block
+yang dibatasi budget. File tidak dipilih dengan tebakan tersembunyi: setiap
+ranking membawa komponen skor, graph distance, finding, boundary, dan content
+hash sebagai provenance.
+
+Model seleksinya dinyatakan eksplisit:
+
+```text
+S(v) = target_bonus + 0.45L(v) + 0.25P(v) + 0.20C(v) + 0.10F(v)
+```
+
+- `L`: overlap query dengan path, simbol, atau finding analyzer
+- `P`: `1 / (1 + d)` dari semantic/explicit seed pada underlying graph
+- `C`: degree centrality ternormalisasi
+- `F`: severity finding tertinggi yang terpetakan ke file
+
+Boundary folder membentuk partisi `P`; quotient graph `G/P` meringkas relasi
+antar-modul sebelum file witness dipilih. Skor ini deterministik untuk snapshot
+dan query yang sama, tetapi bukan bukti bahwa file yang diomit pasti tidak relevan.
+Budget token juga merupakan estimasi portabel `ceil(chars/4)`, bukan tokenizer
+khusus suatu model.
+
+### 2.2B Snapshot Persisten dan Invalidation Inkremental
+
+Kernel melakukan satu discovery/stat pass pada setiap invokasi, tetapi tidak
+membuka source atau mengulang import parsing untuk file yang fingerprint
+stat-nya tidak berubah.
+Snapshot per-file disimpan di `data/codebase/cache/` milik tool dan graph selalu
+dirakit ulang dari record aktif agar add/change/delete langsung mengubah
+resolution edge.
+
+Fingerprint cepat menggunakan `size + mtime_ns + ctime_ns`. Ini adalah trust
+boundary yang eksplisit: filesystem yang dapat mempertahankan ketiga nilai
+setelah isi berubah harus memakai `--cache-mode refresh`. Cache berisi salinan
+source code, di-ignore Git, ditulis atomik, dan diberi permission owner-only
+jika platform mendukungnya. Kegagalan baca/tulis atau JSON rusak tidak
+menggagalkan analisis; kernel melakukan rebuild dan melaporkan statusnya.
+
+Field `graph_cache` membuat reuse dapat diaudit: `status`, `files_reused`,
+`files_read`, `files_added`, `files_changed`, `files_deleted`, dan `hit_ratio`.
 
 ### 2.3 Ide: Memori sebagai Ruang Topologis
 
@@ -170,10 +250,10 @@ Tool ini dibangun di atas 5 pilar teoretis dari Homotopy Type Theory (HoTT):
 │  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐    │
 │  │ CODEBASE KERNEL │  │  MEMORY DOMAIN  │  │ FIBRATION LAYER │    │
 │  │                 │  │                 │  │                 │    │
-│  │ 12 Analyzers    │  │ Store/Recall    │  │ Fiber Init      │    │
+│  │ 13 Analyzers    │  │ Store/Recall    │  │ Fiber Init      │    │
 │  │ Synthesis       │  │ Consolidate     │  │ Lift/Descend    │    │
 │  │ Steering        │  │ Compact/Bridge  │  │ Section         │    │
-│  │ Impact/Outline  │  │ Betti Breakdown │  │ Switch          │    │
+│  │ Context/Impact  │  │ Betti Breakdown │  │ Switch          │    │
 │  └────────┬────────┘  └────────┬────────┘  └────────┬────────┘    │
 │           │                    │                    │              │
 │           └────────────────────┼────────────────────┘              │
@@ -186,13 +266,23 @@ Tool ini dibangun di atas 5 pilar teoretis dari Homotopy Type Theory (HoTT):
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-### 4.2 Codebase Kernel (12 Analyzers)
+### 4.2 Codebase Kernel (13 Analyzers)
 
 | Prefix | Analyzers | Fungsi |
 |---|---|---|
-| `topo.*` | orphan, entrypoint, circular, risk | Struktur & risiko topologis |
+| `topo.*` | orphan, entrypoint, circular, risk, test_reachability | Struktur, risiko, dan static test topology |
 | `perf.*` | async, deopt, gc, cache | Performance anti-patterns |
 | `hott.*` | isomorphism, sheaf, homotopy, manifold | Topological invariants |
+
+### 4.2A Context Projection
+
+| Operasi | Fungsi | Evidence |
+|---|---|---|
+| `context <query>` | Pilih subgraph sesuai pertanyaan | lexical overlap + shortest-path + centrality + findings |
+| `--target` | Tetapkan base projection eksplisit | target dan neighborhood hingga `--max-hops` |
+| `--budget-tokens` | Batasi ukuran `context_block` | hard character budget dengan estimasi token transparan |
+| boundary quotient | Kompres graph file menjadi graph modul | cross-boundary edge + witness |
+| content signature | Identitas snapshot source+edge | deteksi context yang sudah stale |
 
 ### 4.3 Memory Domain
 
@@ -262,7 +352,7 @@ Tidak semua komponen perlu dihubungkan. β₀ tinggi bisa valid jika memang doma
 ### 6.1 Quick Start
 
 ```bash
-# Analisis codebase (semua 12 analyzer)
+# Analisis codebase (semua 13 analyzer)
 python3 tools/ai_studio_tool/hott_kernel.py analyze src --output summary
 
 # Steering (codebase + memory unified)
@@ -270,6 +360,9 @@ python3 tools/ai_studio_tool/hott_kernel.py xsteer src --output summary
 
 # Sebelum edit file
 python3 tools/ai_studio_tool/hott_kernel.py brief src/app/app.ts src --output summary
+
+# Context prompt terukur untuk pertanyaan developer
+python3 tools/ai_studio_tool/hott_kernel.py context "cache key collision" src --budget-tokens 1200 --output prompt
 
 # Inisialisasi fiber (context management)
 python3 tools/ai_studio_tool/hott_kernel.py fiber init "task" "focus"
@@ -292,7 +385,14 @@ hott_kernel.py establish src
 hott_kernel.py impact <file> src
 hott_kernel.py outline <file> src
 hott_kernel.py brief <file> src --output summary
+hott_kernel.py context "<query>" src [--target file[,file]] [--budget-tokens 1200] [--max-hops 2] [--detail outline|source] [--output prompt|summary|full]
 hott_kernel.py analyzers
+hott_kernel.py cache status|refresh|clear src
+
+# Berlaku pada semua mode codebase; default auto
+hott_kernel.py analyze src --output summary --cache-mode auto|refresh|off
+# Alternatif environment
+AI_STUDIO_GRAPH_CACHE=off hott_kernel.py analyze src --output summary
 ```
 
 #### Memory Operations
@@ -374,8 +474,10 @@ tools/ai_studio_tool/
 │
 ├── core/                            # Shared Foundation (Layer 0)
 │   ├── shared_graph.py              # Canonical graph representation
+│   ├── graph_cache.py               # Persistent snapshot + incremental invalidation
 │   ├── analyzer_registry.py         # Registry & lifecycle management
 │   ├── synthesizer.py               # Invariant encoder & decoder steering
+│   ├── context_optimizer.py         # Query-directed quotient context + budget
 │   ├── safety.py                    # Cycle prevention & Betti validation
 │   ├── deprecation.py               # Standalone deprecation handlers
 │   └── __init__.py                  # Core exports
@@ -413,6 +515,7 @@ tools/ai_studio_tool/
 │   └── __init__.py                  # Bridge domain exports
 │
 ├── data/                            # Persistent Storage & State
+│   ├── codebase/cache/              # Ignored source snapshots (generated)
 │   ├── memory/                      # Memory stores & baseline files
 │   └── fiber/                       # Active fiber state & fiber archives
 │
@@ -449,13 +552,13 @@ Tidak semua hal perlu terhubung. β₀ tinggi bisa valid jika memang domain berb
 | Metrik | Nilai |
 |---|---|
 | Total CLI modes | 30+ |
-| Total analyzers | 17 (12 codebase + 5 memory) |
-| Targeted queries | 3 (impact, outline, brief) |
+| Total analyzers | 18 (13 codebase + 5 memory) |
+| Targeted queries | 4 (context, impact, outline, brief) |
 | Cross-domain modes | 3 (xanalyze, xsteer, xcontext) |
 | Memory operations | 12 |
 | Fiber operations | 8 |
 | Safety checks | 2 (cycle prevention, fiber compatibility) |
-| Fixture baseline | 28 tests PASS |
+| Fixture baseline | 32 fixture minimal + 2 portable integration smoke PASS |
 | Betti-preservation | β₁_reasoning = 0 (terjaga di semua operasi) |
 | Zero-dependency | Python 3 stdlib only |
 
@@ -472,4 +575,3 @@ Tool ini dibangun berdasarkan konsep-konsep dari:
 5. **hott**: HITs untuk Memory Consolidation — Betti numbers sebagai metrik kesehatan memori
 
 ---
-

@@ -18,8 +18,10 @@ Script ini:
 
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -479,6 +481,83 @@ FIXTURES = {
     ),
     Path("fixtures_min/f30_complexity_calibration/project/src/b.ts"): (
         "export const b = true;\n"
+    ),
+    # F32 reciprocal imports are parallel 1-cells after orientation is forgotten
+    Path("fixtures_min/f32_reciprocal_cycle/project/src/a.ts"): (
+        "import './b';\n"
+        "export const a = true;\n"
+    ),
+    Path("fixtures_min/f32_reciprocal_cycle/project/src/b.ts"): (
+        "import './a';\n"
+        "export const b = true;\n"
+    ),
+    # F33 static test import reachability (not runtime coverage)
+    Path("fixtures_min/f33_test_reachability/project/src/app.spec.ts"): (
+        "import './app';\n"
+        "export const appSpec = true;\n"
+    ),
+    Path("fixtures_min/f33_test_reachability/project/src/app.ts"): (
+        "import './service';\n"
+        "export const app = true;\n"
+    ),
+    Path("fixtures_min/f33_test_reachability/project/src/service.ts"): (
+        "import './core';\n"
+        "export const service = true;\n"
+    ),
+    Path("fixtures_min/f33_test_reachability/project/src/core.ts"): (
+        "export const core = true;\n"
+    ),
+    Path("fixtures_min/f33_test_reachability/project/src/critical.ts"): (
+        "export const critical = true;\n"
+    ),
+    Path("fixtures_min/f33_test_reachability/project/src/consumer-a.ts"): (
+        "import './critical';\n"
+        "export const consumerA = true;\n"
+    ),
+    Path("fixtures_min/f33_test_reachability/project/src/consumer-b.ts"): (
+        "import './critical';\n"
+        "export const consumerB = true;\n"
+    ),
+    Path("fixtures_min/f33_test_reachability/project/src/orphan.spec.ts"): (
+        "export const orphanSpec = true;\n"
+    ),
+    # F34 query-directed context projection and boundary quotient
+    Path("fixtures_min/f34_context_optimizer/project/src/orders/pricing.ts"): (
+        "export function calculatePricing(quantity: number) {\n"
+        "  return quantity * 100;\n"
+        "}\n"
+    ),
+    Path("fixtures_min/f34_context_optimizer/project/src/orders/repository.ts"): (
+        "export const orderRepository = new Map<string, number>();\n"
+    ),
+    Path("fixtures_min/f34_context_optimizer/project/src/orders/order.service.ts"): (
+        "import { calculatePricing } from './pricing';\n"
+        "import { orderRepository } from './repository';\n"
+        "export const createOrder = (id: string, quantity: number) => {\n"
+        "  orderRepository.set(id, calculatePricing(quantity));\n"
+        "};\n"
+    ),
+    Path("fixtures_min/f34_context_optimizer/project/src/orders/order.controller.ts"): (
+        "import { createOrder } from './order.service';\n"
+        "export const submitOrder = createOrder;\n"
+    ),
+    Path("fixtures_min/f34_context_optimizer/project/src/orders/order.spec.ts"): (
+        "import { submitOrder } from './order.controller';\n"
+        "export const orderSpec = submitOrder;\n"
+    ),
+    Path("fixtures_min/f34_context_optimizer/project/src/auth/auth.service.ts"): (
+        "export const authenticate = () => true;\n"
+    ),
+    # F35 persistent SharedGraph cache and file-level invalidation
+    Path("fixtures_min/f35_incremental_cache/project/src/a.ts"): (
+        "import './b';\n"
+        "export const a = true;\n"
+    ),
+    Path("fixtures_min/f35_incremental_cache/project/src/b.ts"): (
+        "export const b = true;\n"
+    ),
+    Path("fixtures_min/f35_incremental_cache/project/src/c.ts"): (
+        "export const c = true;\n"
     ),
 }
 
@@ -1446,6 +1525,7 @@ def test_f26_topological_manifold():
     scan_root = f"{project}/src"
     from core.shared_graph import build_shared_graph
     from codebase.hott_analyzers import analyze_manifold
+    from codebase.topology_analyzers import analyze_circular
 
     sg = build_shared_graph(scan_root)
     result = analyze_manifold(sg)
@@ -1463,6 +1543,31 @@ def test_f26_topological_manifold():
     expect(
         betti["beta_0"] == 1,
         f"{name}: β₀ harus 1 (terhubung penuh)"
+    )
+    expect(
+        betti["beta_1"] == 1,
+        f"{name}: β₁ harus 1 untuk triangle DAG pada underlying undirected graph"
+    )
+
+    basis = result.get("cycle_basis", [])
+    expect(len(basis) == 1, f"{name}: harus ada satu cycle-basis witness")
+    expect(
+        basis[0].get("orientation") == "mixed",
+        f"{name}: triangle DAG bukan circular import berarah",
+    )
+    circular = analyze_circular(sg)
+    expect(
+        circular.get("summary", {}).get("total_cycles") == 0,
+        f"{name}: β₁ undirected tidak boleh dianggap circular import",
+    )
+    model = result.get("topological_model", {})
+    expect(
+        model.get("name") == "dependency_multigraph_1_complex",
+        f"{name}: model topologi harus dinyatakan eksplisit",
+    )
+    expect(
+        model.get("edge_orientation_for_betti") == "ignored",
+        f"{name}: orientasi edge harus dinyatakan diabaikan untuk Betti",
     )
 
     expect(
@@ -1507,6 +1612,11 @@ def test_f27_invariant_encoder():
     context_block = result.get("context_block", "")
     expect("[TOPOLOGICAL FINGERPRINT]" in context_block, f"{name}: context block harus ada")
     expect(hash1 in context_block, f"{name}: context block harus berisi signature")
+    expect("Cycle Semantics:" in context_block, f"{name}: context block harus menjelaskan cycle semantics")
+    expect(
+        result.get("cycle_semantics", {}).get("model") == "dependency_multigraph_1_complex",
+        f"{name}: encoder harus meneruskan model topologi",
+    )
 
 
 def test_f28_decoder_steering():
@@ -1574,6 +1684,10 @@ def test_f28_decoder_steering():
         steer_result["current_fingerprint"]["signature_hash"] in prompt_block,
         f"{name}: prompt block harus berisi signature"
     )
+    expect(
+        "Cycle Interpretation:" in prompt_block,
+        f"{name}: steering prompt harus mencegah penyamaan β₁ dengan circular import",
+    )
 
     # Cleanup baseline
     import os as _os
@@ -1603,6 +1717,24 @@ def test_f29_archetype_calibration():
     betti = result.get("summary", {}).get("betti_numbers", {})
     expect(betti.get("beta_0") == 2, f"{name}: beta_0 harus 2 (dua komponen)")
     expect(betti.get("beta_1") == 1, f"{name}: beta_1 harus 1 (satu cycle)")
+
+    from core.shared_graph import build_shared_graph
+    from codebase.hott_analyzers import analyze_manifold
+    from codebase.topology_analyzers import analyze_circular
+
+    graph = build_shared_graph(scan_root)
+    manifold = analyze_manifold(graph)
+    basis = manifold.get("cycle_basis", [])
+    expect(len(basis) == 1, f"{name}: harus ada satu cycle-basis witness")
+    expect(
+        basis[0].get("orientation") == "directed",
+        f"{name}: a->b->c->a harus dikenali sebagai directed witness",
+    )
+    circular = analyze_circular(graph)
+    expect(
+        circular.get("summary", {}).get("total_cycles") == 1,
+        f"{name}: directed witness harus cocok dengan satu circular import",
+    )
 
 
 def test_f30_complexity_calibration():
@@ -1644,6 +1776,259 @@ def test_f30_complexity_calibration():
         signature.startswith("sha256:"),
         f"{name}: signature_hash harus tetap ada"
     )
+
+
+def test_f32_reciprocal_cycle_basis():
+    name = "F32"
+    scan_root = "fixtures_min/f32_reciprocal_cycle/project/src"
+    from core.shared_graph import build_shared_graph
+    from codebase.hott_analyzers import analyze_manifold
+    from codebase.topology_analyzers import analyze_circular
+
+    graph = build_shared_graph(scan_root)
+    manifold = analyze_manifold(graph)
+    betti = manifold.get("manifold", {}).get("betti_numbers", {})
+    basis = manifold.get("cycle_basis", [])
+
+    expect(betti.get("beta_0") == 1, f"{name}: dua file reciprocal harus terhubung")
+    expect(betti.get("beta_1") == 1, f"{name}: dua import reciprocal harus membentuk β₁=1")
+    expect(len(basis) == 1, f"{name}: reciprocal cycle harus punya satu witness")
+    expect(basis[0].get("length") == 2, f"{name}: witness harus berupa cycle dua edge")
+    expect(basis[0].get("orientation") == "directed", f"{name}: reciprocal cycle harus directed")
+    expect(
+        manifold.get("manifold", {}).get("cycle_basis_complete") is True,
+        f"{name}: cycle basis harus lengkap untuk multigraph",
+    )
+    expect(
+        analyze_circular(graph).get("summary", {}).get("total_cycles") == 1,
+        f"{name}: reciprocal import harus terdeteksi circular",
+    )
+
+
+def test_f33_static_test_reachability():
+    name = "F33"
+    scan_root = "fixtures_min/f33_test_reachability/project/src"
+    from core.shared_graph import build_shared_graph
+    from codebase.topology_analyzers import analyze_test_reachability
+
+    result = analyze_test_reachability(build_shared_graph(scan_root))
+    summary = result.get("summary", {})
+    expect(summary.get("total_tests") == 2, f"{name}: harus ada dua test file")
+    expect(summary.get("total_production_files") == 6, f"{name}: harus ada enam source file")
+    expect(summary.get("directly_tested_files") == 1, f"{name}: hanya app.ts yang direct target")
+    expect(summary.get("statically_reachable_files") == 3, f"{name}: app/service/core harus reachable")
+    expect(summary.get("statically_unreachable_files") == 3, f"{name}: tiga source harus unreachable")
+    expect(summary.get("static_test_reachability_ratio") == 0.5, f"{name}: ratio harus 0.5")
+    expect(summary.get("testless_component_count") == 1, f"{name}: harus ada satu testless component")
+    expect(summary.get("high_influence_without_test_path") == 1, f"{name}: critical harus high influence gap")
+    expect(summary.get("isolated_test_count") == 1, f"{name}: orphan.spec harus isolated")
+
+    core_file = f"{scan_root}/core.ts"
+    app_test = f"{scan_root}/app.spec.ts"
+    witness = result.get("source_test_witnesses", {}).get(core_file, [])
+    expect(len(witness) == 1, f"{name}: core.ts harus punya satu test witness")
+    expect(
+        witness[0].get("path") == [
+            app_test,
+            f"{scan_root}/app.ts",
+            f"{scan_root}/service.ts",
+            core_file,
+        ],
+        f"{name}: path test ke core harus lengkap dan directional",
+    )
+    expect(
+        result.get("model", {}).get("not_runtime_coverage") is True,
+        f"{name}: output harus menolak klaim runtime coverage",
+    )
+    expect(
+        f"{scan_root}/critical.ts" in result.get("unreachable_sources", []),
+        f"{name}: critical.ts harus tidak terjangkau test",
+    )
+
+
+def test_f34_context_optimizer():
+    name = "F34"
+    scan_root = "fixtures_min/f34_context_optimizer/project/src"
+    pricing = f"{scan_root}/orders/pricing.ts"
+    order_service = f"{scan_root}/orders/order.service.ts"
+    auth_service = f"{scan_root}/auth/auth.service.ts"
+
+    from core.analyzer_registry import run_analyzers
+    from core.context_optimizer import build_context_pack
+    from core.shared_graph import build_shared_graph
+
+    graph = build_shared_graph(scan_root)
+    analyzer_output = run_analyzers(graph)
+    kwargs = {
+        "query": "pricing calculation",
+        "budget_tokens": 600,
+        "max_hops": 2,
+        "detail": "source",
+        "analyzer_output": analyzer_output,
+    }
+    result = build_context_pack(graph, **kwargs)
+    repeated = build_context_pack(graph, **kwargs)
+
+    selected = result.get("selection", {}).get("selected_paths", [])
+    expect(selected and selected[0] == pricing, f"{name}: pricing.ts harus semantic seed pertama")
+    expect(order_service in selected, f"{name}: neighbor order.service harus masuk context")
+    expect(auth_service not in selected, f"{name}: boundary auth yang tidak relevan harus diomit")
+    expect(
+        selected == repeated.get("selection", {}).get("selected_paths", []),
+        f"{name}: ranking file harus deterministik",
+    )
+    expect(
+        result.get("context_block") == repeated.get("context_block"),
+        f"{name}: prompt context harus deterministik",
+    )
+    expect(
+        result.get("provenance", {}).get("graph_content_signature")
+        == repeated.get("provenance", {}).get("graph_content_signature"),
+        f"{name}: content signature harus deterministik",
+    )
+    budget = result.get("budget", {})
+    expect(budget.get("within_budget") is True, f"{name}: hard budget harus dipatuhi")
+    expect(
+        budget.get("used_chars", 1) <= budget.get("char_budget", 0),
+        f"{name}: context_block tidak boleh melewati character budget",
+    )
+    expect(
+        result.get("provenance", {}).get("optimizer_additional_filesystem_scans") == 0,
+        f"{name}: optimizer harus reuse SharedGraph tanpa rescan",
+    )
+    quotient = result.get("quotient_graph", {}).get("summary", {})
+    expect(quotient.get("quotient_vertex_count") == 2, f"{name}: quotient harus punya orders+auth")
+    expect(
+        quotient.get("relevant_boundary_count") == 1,
+        f"{name}: hanya boundary orders yang relevan",
+    )
+    context_block = result.get("context_block", "")
+    expect("0.45L+0.25P+0.20C+0.10F" in context_block, f"{name}: formula harus transparan")
+    expect("calculatePricing" in context_block, f"{name}: source witness harus masuk context")
+    expect(
+        result.get("model", {}).get("claim_boundary", "").startswith("Ranking is deterministic"),
+        f"{name}: batas klaim ranking harus eksplisit",
+    )
+
+
+def test_f35_incremental_graph_cache():
+    name = "F35"
+    source_project = ROOT / "fixtures_min/f35_incremental_cache/project/src"
+
+    from core.graph_cache import (
+        build_cached_shared_graph,
+        clear_graph_cache,
+        get_graph_cache_status,
+    )
+
+    with tempfile.TemporaryDirectory() as temporary_root:
+        project = Path(temporary_root) / "project"
+        cache_dir = Path(temporary_root) / "cache"
+        shutil.copytree(source_project, project)
+
+        first = build_cached_shared_graph(str(project), cache_dir=str(cache_dir))
+        first_cache = first.get("cache", {})
+        expect(first_cache.get("status") == "miss", f"{name}: build awal harus miss")
+        expect(first_cache.get("files_read") == 3, f"{name}: build awal harus baca 3 file")
+        expect(first_cache.get("files_added") == 3, f"{name}: build awal harus catat 3 file baru")
+        expect(first_cache.get("contains_source_content") is True, f"{name}: disclosure source wajib")
+
+        second = build_cached_shared_graph(str(project), cache_dir=str(cache_dir))
+        second_cache = second.get("cache", {})
+        expect(second_cache.get("status") == "hit", f"{name}: build kedua harus hit")
+        expect(second_cache.get("files_reused") == 3, f"{name}: 3 file harus dipakai ulang")
+        expect(second_cache.get("files_read") == 0, f"{name}: cache hit tidak boleh baca source")
+        for key in (
+            "vertices",
+            "edges",
+            "node_metadata",
+            "resolved_imports",
+            "unresolved_imports",
+            "external_imports",
+            "boundaries",
+            "file_to_boundary",
+            "type_shapes",
+            "summary",
+        ):
+            expect(first.get(key) == second.get(key), f"{name}: cache hit mengubah {key}")
+
+        b_path = project / "b.ts"
+        b_path.write_text(
+            "import './c';\nexport const b = true;\n",
+            encoding="utf-8",
+        )
+        changed = build_cached_shared_graph(str(project), cache_dir=str(cache_dir))
+        changed_cache = changed.get("cache", {})
+        expect(changed_cache.get("status") == "partial", f"{name}: mutation harus partial")
+        expect(changed_cache.get("files_changed") == 1, f"{name}: hanya b.ts berubah")
+        expect(changed_cache.get("files_read") == 1, f"{name}: hanya b.ts dibaca ulang")
+        expect(changed_cache.get("files_reused") == 2, f"{name}: dua file harus reuse")
+        expect(changed.get("summary", {}).get("total_edges") == 2, f"{name}: edge baru harus terbentuk")
+
+        extra_path = project / "extra.ts"
+        extra_path.write_text("export const extra = true;\n", encoding="utf-8")
+        added = build_cached_shared_graph(str(project), cache_dir=str(cache_dir))
+        added_cache = added.get("cache", {})
+        expect(added_cache.get("files_added") == 1, f"{name}: extra.ts harus terdeteksi")
+        expect(added_cache.get("files_read") == 1, f"{name}: hanya extra.ts dibaca")
+        expect(added_cache.get("files_reused") == 3, f"{name}: tiga file harus reuse")
+
+        (project / "c.ts").unlink()
+        deleted = build_cached_shared_graph(str(project), cache_dir=str(cache_dir))
+        deleted_cache = deleted.get("cache", {})
+        expect(deleted_cache.get("files_deleted") == 1, f"{name}: delete harus terdeteksi")
+        expect(deleted_cache.get("files_read") == 0, f"{name}: delete tak perlu baca source")
+        expect(deleted_cache.get("files_reused") == 3, f"{name}: file tersisa harus reuse")
+        expect(deleted.get("summary", {}).get("total_unresolved") == 1, f"{name}: import c jadi unresolved")
+
+        status = get_graph_cache_status(str(project), cache_dir=str(cache_dir))
+        expect(status.get("status") == "valid", f"{name}: cache pascahapus harus valid")
+        expect(status.get("files_reusable") == 3, f"{name}: status harus lapor 3 reusable")
+
+        refreshed = build_cached_shared_graph(
+            str(project),
+            cache_dir=str(cache_dir),
+            mode="refresh",
+        )
+        refresh_cache = refreshed.get("cache", {})
+        expect(refresh_cache.get("status") == "refreshed", f"{name}: refresh harus eksplisit")
+        expect(refresh_cache.get("files_read") == 3, f"{name}: refresh harus baca semua file")
+
+        cache_path = Path(refresh_cache.get("cache_path", ""))
+        cache_path.write_text("{cache-rusak", encoding="utf-8")
+        recovered = build_cached_shared_graph(str(project), cache_dir=str(cache_dir))
+        recovered_cache = recovered.get("cache", {})
+        expect(recovered_cache.get("status") == "recovered", f"{name}: corrupt harus recovery")
+        expect(recovered_cache.get("files_read") == 3, f"{name}: recovery harus rebuild")
+        expect(
+            str(recovered_cache.get("recovery_reason", "")).startswith("cache_read_error:"),
+            f"{name}: alasan recovery harus transparan",
+        )
+
+        cleared = clear_graph_cache(str(project), cache_dir=str(cache_dir))
+        expect(cleared.get("status") == "cleared", f"{name}: clear harus menghapus entry")
+        missing = get_graph_cache_status(str(project), cache_dir=str(cache_dir))
+        expect(missing.get("status") == "missing", f"{name}: status setelah clear harus missing")
+
+        disabled = build_cached_shared_graph(
+            str(project),
+            cache_dir=str(cache_dir),
+            mode="off",
+        )
+        expect(disabled.get("cache", {}).get("status") == "disabled", f"{name}: mode off harus bypass")
+
+        write_failed = build_cached_shared_graph(
+            str(project),
+            cache_dir=str(project / "a.ts"),
+        )
+        expect(
+            write_failed.get("cache", {}).get("status") == "write_failed",
+            f"{name}: cache path tak dapat ditulis tidak boleh menggagalkan graph",
+        )
+        expect(
+            write_failed.get("summary", {}).get("total_files") == 3,
+            f"{name}: write failure tetap harus menghasilkan graph lengkap",
+        )
 
 
 def test_f31_memory_topology_betti():
@@ -1708,15 +2093,66 @@ def _run_kernel(*args):
 def test_kernel_wiring_smoke():
     """Kunci jalur CLI read-only yang rentan rusak setelah reorganisasi modul."""
     analyzers = _run_kernel("analyzers").get("available_analyzers", [])
-    expect(len(analyzers) == 12, "KERNEL: semua 12 codebase analyzer harus aktif")
+    expect(len(analyzers) == 13, "KERNEL: semua 13 codebase analyzer harus aktif")
     expect("topo.circular" in analyzers, "KERNEL: topo.circular harus terdaftar")
     expect("topo.risk" in analyzers, "KERNEL: topo.risk harus terdaftar")
+    expect(
+        "topo.test_reachability" in analyzers,
+        "KERNEL: topo.test_reachability harus terdaftar",
+    )
 
     project = "fixtures_min/f16_file_brief/project"
     target = f"{project}/src/app.ts"
     for command in ("impact", "outline", "brief"):
         result = _run_kernel(command, target, project)
         expect(result.get("exists") is True, f"KERNEL: {command} harus menemukan target")
+
+    _run_kernel("cache", "clear", project)
+    context_result = _run_kernel(
+        "context",
+        "app dependency change",
+        project,
+        "--target",
+        target,
+        "--budget-tokens",
+        "400",
+        "--output",
+        "prompt",
+    )
+    expect(context_result.get("mode") == "context", "KERNEL: mode context harus terhubung")
+    expect(
+        target in context_result.get("selection", {}).get("selected_paths", []),
+        "KERNEL: context harus membawa explicit target",
+    )
+    expect(
+        context_result.get("budget", {}).get("within_budget") is True,
+        "KERNEL: context CLI harus mematuhi budget",
+    )
+    first_cache = context_result.get("graph_cache", {})
+    expect(first_cache.get("status") == "miss", "KERNEL: context awal harus cache miss")
+    expect(first_cache.get("files_read") == 3, "KERNEL: context awal harus baca 3 source")
+
+    repeated_context = _run_kernel(
+        "context",
+        "app dependency change",
+        project,
+        "--target",
+        target,
+        "--budget-tokens",
+        "400",
+        "--output",
+        "prompt",
+    )
+    repeated_cache = repeated_context.get("graph_cache", {})
+    expect(repeated_cache.get("status") == "hit", "KERNEL: context kedua harus cache hit")
+    expect(repeated_cache.get("files_reused") == 3, "KERNEL: context kedua harus reuse 3 source")
+    expect(repeated_cache.get("files_read") == 0, "KERNEL: context kedua tidak boleh baca source")
+    expect(
+        context_result.get("context_block") == repeated_context.get("context_block"),
+        "KERNEL: cache tidak boleh mengubah context block",
+    )
+    cache_status = _run_kernel("cache", "status", project).get("cache", {})
+    expect(cache_status.get("status") == "valid", "KERNEL: cache status harus valid")
 
     _run_kernel("steer", project, "--output", "summary")
 
@@ -1736,6 +2172,149 @@ def test_kernel_wiring_smoke():
         memory_archetype not in (None, "unknown"),
         "KERNEL: xsteer harus meneruskan memory_archetype yang terhitung",
     )
+    _run_kernel("cache", "clear", project)
+
+
+def test_kernel_cli_contract():
+    """Kunci validasi input dan status analyzer untuk pemanggil Bash/API."""
+    env = dict(os.environ)
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+
+    def run_raw(*args):
+        completed = subprocess.run(
+            [sys.executable, str(ROOT / "hott_kernel.py"), *args],
+            cwd=ROOT,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        try:
+            payload = json.loads(completed.stdout)
+        except json.JSONDecodeError as exc:
+            expect(False, f"CLI: {' '.join(args)} bukan JSON valid: {exc}")
+            return completed, {}
+        return completed, payload
+
+    completed, help_payload = run_raw("--help")
+    expect(completed.returncode == 0, "CLI: --help harus sukses")
+    expect(not help_payload.get("error"), "CLI: --help tidak boleh menjadi error")
+    expect("analyze" in help_payload.get("usage", {}), "CLI: help harus memuat analyze")
+    expect("context" in help_payload.get("usage", {}), "CLI: help harus memuat context")
+    expect("cache" in help_payload.get("usage", {}), "CLI: help harus memuat cache")
+    expect(
+        "cache_mode" in help_payload.get("global_options", {}),
+        "CLI: help harus memuat cache mode global",
+    )
+
+    project = "fixtures_min/f16_file_brief/project"
+    completed, invalid_analyzer = run_raw(
+        "analyze",
+        project,
+        "--analyzers",
+        "tidak.ada",
+        "--output",
+        "summary",
+    )
+    summary = invalid_analyzer.get("unified_summary", {})
+    expect(completed.returncode == 3, "CLI: partial analyzer result harus memakai exit code 3")
+    expect(summary.get("analyzers_failed") == 1, "CLI: analyzer invalid harus dihitung gagal")
+    expect(summary.get("analysis_status") == "partial", "CLI: analyzer gagal harus berstatus partial")
+    expect(
+        "tidak.ada" in summary.get("analyzer_errors", {}),
+        "CLI: alasan analyzer gagal harus tersedia untuk pemanggil",
+    )
+
+    completed, missing_root = run_raw("synthesize", "direktori-yang-tidak-ada", "--output", "summary")
+    expect(completed.returncode == 2, "CLI: input error harus memakai exit code 2")
+    expect(
+        missing_root.get("error_code") == "scan_root_not_found",
+        "CLI: root yang tidak ada harus ditolak eksplisit",
+    )
+
+    completed, invalid_output = run_raw("synthesize", project, "--output", "bukan-mode")
+    expect(completed.returncode == 2, "CLI: output mode invalid harus memakai exit code 2")
+    expect(
+        invalid_output.get("error_code") == "invalid_output_mode",
+        "CLI: output mode invalid harus ditolak eksplisit",
+    )
+
+    completed, invalid_cache_mode = run_raw(
+        "analyze",
+        project,
+        "--output",
+        "summary",
+        "--cache-mode",
+        "bukan-mode",
+    )
+    expect(completed.returncode == 2, "CLI: cache mode invalid harus memakai exit code 2")
+    expect(
+        invalid_cache_mode.get("error_code") == "invalid_graph_cache_mode",
+        "CLI: cache mode invalid harus punya error code stabil",
+    )
+
+    completed, invalid_cache_action = run_raw("cache", "bukan-aksi", project)
+    expect(completed.returncode == 2, "CLI: cache action invalid harus memakai exit code 2")
+    expect(
+        invalid_cache_action.get("error_code") == "invalid_cache_action",
+        "CLI: cache action invalid harus punya error code stabil",
+    )
+
+    completed, cache_off = run_raw(
+        "analyze",
+        project,
+        "--output",
+        "summary",
+        "--cache-mode",
+        "off",
+    )
+    expect(completed.returncode == 0, "CLI: cache mode off harus tetap sukses")
+    expect(
+        cache_off.get("graph_cache", {}).get("status") == "disabled",
+        "CLI: mode off harus terlihat dalam provenance",
+    )
+
+    completed, invalid_budget = run_raw(
+        "context",
+        "app dependency",
+        project,
+        "--budget-tokens",
+        "12",
+    )
+    expect(completed.returncode == 2, "CLI: context budget terlalu kecil harus exit code 2")
+    expect(
+        invalid_budget.get("error_code") == "invalid_context_budget",
+        "CLI: context budget invalid harus ditolak eksplisit",
+    )
+
+    completed, missing_target = run_raw(
+        "context",
+        "app dependency",
+        project,
+        "--target",
+        "src/tidak-ada.ts",
+    )
+    expect(completed.returncode == 2, "CLI: explicit target yang hilang harus exit code 2")
+    expect(
+        missing_target.get("error_code") == "context_target_not_found",
+        "CLI: target context yang hilang harus punya error code stabil",
+    )
+
+    _, empty_analysis = run_raw("analyze", ".", "--output", "summary")
+    empty_summary = empty_analysis.get("unified_summary", {})
+    expect(empty_summary.get("analysis_status") == "empty", "CLI: domain tanpa TS/JS harus ditandai empty")
+    expect(
+        ".py" not in empty_summary.get("supported_source_extensions", []),
+        "CLI: dukungan Python tidak boleh aktif secara implisit",
+    )
+
+    completed, _ = run_raw("analyze", project, "--output", "summary")
+    expect(
+        "DeprecationWarning" not in completed.stderr,
+        "CLI: analisis tidak boleh menghasilkan warning datetime deprecated",
+    )
+    run_raw("cache", "clear", project)
+    run_raw("cache", "clear", ".")
 
 
 def main():
@@ -1770,7 +2349,12 @@ def main():
         test_f29_archetype_calibration,
         test_f30_complexity_calibration,
         test_f31_memory_topology_betti,
+        test_f32_reciprocal_cycle_basis,
+        test_f33_static_test_reachability,
+        test_f34_context_optimizer,
+        test_f35_incremental_graph_cache,
         test_kernel_wiring_smoke,
+        test_kernel_cli_contract,
     ]
 
     for test in tests:
@@ -1785,7 +2369,7 @@ def main():
             print(f"- {failure}")
         sys.exit(1)
 
-    print("PASS: 28 fixture minimal + 1 kernel wiring smoke aman")
+    print("PASS: 32 fixture minimal + 2 portable integration smoke aman")
 
 
 if __name__ == "__main__":

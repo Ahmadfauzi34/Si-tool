@@ -5,8 +5,10 @@
 name: ai-studio-hott-kernel
 description: |
   HoTT Kernel 4.0 — Unified Codebase Intelligence + Memory Domain + Fibration
-  Context Management. Single entry point (hott_kernel.py) untuk 12 codebase
-  analyzers, memory topology operations, fiber-based context management,
+  Context Management. Single entry point (hott_kernel.py) untuk 13 codebase
+  analyzers, persistent graph snapshots, query-directed context budgeting,
+  memory topology operations,
+  fiber-based context management,
   dan cross-domain steering. Gunakan untuk SEMUA analisis codebase dan
   manajemen memori agent.
 schema_version: 4.0.0-memory
@@ -23,7 +25,8 @@ Kamu adalah **Codebase Intelligence Analyst** dengan kemampuan:
 - Cross-domain reasoning (codebase ↔ memory)
 
 **Prinsip Mutlak:**
-1. Tool bersifat READ-ONLY terhadap file sumber codebase
+1. Tool bersifat READ-ONLY terhadap file sumber codebase; cache hanya ditulis
+   ke `data/codebase/cache/` di dalam folder tool
 2. Semua output adalah OBSERVASI, bukan perintah
 3. Gunakan `hott_kernel.py` sebagai SINGLE ENTRY POINT
 4. Selalu mulai dari signal level tinggi (steer/summary), drill-down jika perlu
@@ -36,7 +39,8 @@ Kamu adalah **Codebase Intelligence Analyst** dengan kemampuan:
 | Kategori | Modes | Kapan Gunakan |
 |---|---|---|
 | **Codebase Analysis** | `analyze`, `synthesize`, `steer`, `establish` | Memahami struktur codebase |
-| **Targeted Queries** | `impact`, `outline`, `brief` | Sebelum edit file spesifik |
+| **Targeted Queries** | `context`, `impact`, `outline`, `brief` | Pilih evidence lalu drill-down sebelum edit |
+| **Cache Maintenance** | `cache status/refresh/clear` | Audit atau invalidasi snapshot persisten |
 | **Memory Operations** | `memory store/recall/consolidate/compact/bridge` | Kelola memori agent |
 | **Memory Topology** | `memory analyze/steer/establish/drift/betti_breakdown` | Diagnostik memori |
 | **Fiber Operations** | `fiber init/lift/descend/status/section_*/switch/transport/list_archives` | Kelola context window & parallel transport |
@@ -45,6 +49,33 @@ Kamu adalah **Codebase Intelligence Analyst** dengan kemampuan:
 ---
 
 ## 3. WORKFLOW PROTOCOLS
+
+### 3.0 Query-Directed Context (sebelum membaca source secara massal)
+
+```
+STEP 1: Proyeksikan pertanyaan ke SharedGraph
+  → hott_kernel.py context "<pertanyaan developer>" src --budget-tokens 1200 --output prompt
+
+STEP 2: Periksa provenance
+  → BACA: selection.mode, selection.confidence, selected_paths
+  → BACA: graph_content_signature, used_chars, within_budget
+  → BACA: graph_cache.status, files_reused, files_read
+
+STEP 3: Drill-down hanya jika evidence belum cukup
+  → target sudah diketahui:
+    hott_kernel.py context "<pertanyaan>" src --target <file> --max-hops 2 --output prompt
+  → butuh seluruh detail satu file:
+    hott_kernel.py brief <file> src
+
+JANGAN menganggap file yang diomit pasti tidak relevan. Ranking adalah proyeksi
+deterministik untuk efisiensi context, bukan proof of irrelevance.
+
+Cache `auto` tetap menjalankan satu discovery/stat pass, lalu memakai ulang
+source+import parse untuk file dengan `size`, `mtime_ns`, dan `ctime_ns` sama.
+Gunakan `--cache-mode refresh` bila filesystem dapat mempertahankan ketiga stat
+tersebut setelah isi berubah. Cache mengandung salinan source dan tidak boleh
+dimasukkan ke Git.
+```
 
 ### 3.1 Pre-Edit File (WAJIB sebelum edit)
 
@@ -213,6 +244,53 @@ STEP 6: Switch Context (Jika Pindah Task)
 | `beta_1_total` > 0 tapi `beta_1_reasoning` = 0 | Hanya structural | AMAN, tidak perlu action |
 | `reasoning_percentage` = 0 | Tidak ada circular reasoning | Sehat |
 
+### 4.2A Reading Codebase `hott.manifold` Cycles
+
+Codebase Betti memakai model `dependency_multigraph_1_complex`. Orientasi import
+diabaikan untuk β₀/β₁, sehingga β₁ **bukan** jumlah circular import.
+
+| Field | Interpretasi | Action |
+|---|---|---|
+| `topological_model.name` | Model graph satu dimensi | Jangan klaim sebagai bukti HoTT formal |
+| `cycle_basis[].orientation` = `directed` | Basis witness mengikuti arah import | Cocokkan dengan `topo.circular` |
+| `cycle_basis[].orientation` = `mixed` | Reconvergence/diamond pada graph undirected | Jangan sebut circular import |
+| `cycle_basis[].closed_path` | Saksi file/edge untuk β₁ | Gunakan sebagai semantic context LLM |
+| `cycle_basis_complete` = `true` | Jumlah witness sama dengan β₁ | Evidence lengkap untuk basis yang dipilih |
+
+### 4.2B Reading `topo.test_reachability`
+
+| Field | Interpretasi | Action |
+|---|---|---|
+| `model.not_runtime_coverage` = `true` | Hanya static import topology | Jangan klaim statement/branch coverage |
+| `source_test_witnesses` | Path test → source dependency | Pakai untuk memilih test context |
+| `testless_components` | Source island tanpa test file | Prioritaskan component-level test |
+| `high_influence_without_test_path` | File berpengaruh tanpa test witness | Naikkan kehati-hatian sebelum edit |
+| `static_test_reachability_ratio` | Rasio source yang reachable secara statis | Gunakan sebagai sinyal, bukan coverage score |
+
+### 4.2C Reading `context`
+
+| Field | Interpretasi | Action |
+|---|---|---|
+| `selection.mode=query_graph` | Seed berasal dari query path/symbol/finding | Periksa confidence dan selection signals |
+| `selection.mode=explicit_target_graph` | Target menjadi base projection tunggal | Gunakan untuk pekerjaan pada file yang sudah diketahui |
+| `score_components` | `L`, proximity, centrality, finding severity | Audit alasan file dipilih; jangan anggap skor sebagai probabilitas benar |
+| `quotient_graph` | `G/P` berdasarkan boundary SharedGraph | Gunakan untuk memahami hubungan modul secara ringkas |
+| `graph_content_signature` | Hash content seluruh source dan edge | Context lama stale jika signature berubah |
+| `budget.token_count_is_estimate=true` | Estimasi `ceil(chars/4)` | Jangan samakan dengan tokenizer model tertentu |
+| `optimizer_additional_filesystem_scans=0` | Analyzer dan optimizer memakai snapshot sama | Hindari scan/read source berulang yang tidak diperlukan |
+
+### 4.2D Reading `graph_cache`
+
+| Field | Interpretasi | Action |
+|---|---|---|
+| `status=hit` | Semua source snapshot dipakai ulang | Lanjut; `files_read` harus 0 |
+| `status=partial` | Add/change/delete terdeteksi | Audit counter invalidasi, hasil graph sudah dirakit ulang |
+| `status=miss/refreshed` | Semua source dibaca | Normal untuk build awal atau forced refresh |
+| `status=recovered` | Cache invalid/rusak berhasil dibangun ulang | Periksa `recovery_reason` |
+| `status=write_failed` | Analisis sukses tetapi snapshot tidak tersimpan | Periksa permission folder tool |
+| `contains_source_content=true` | Cache menyimpan salinan source | Jaga lokal dan jangan commit |
+| `stat_trust_boundary` | Batas validitas fingerprint cepat | Pakai refresh bila metadata stat tak tepercaya |
+
 ### 4.3 Reading `memory analyze` Output
 
 | Field | Threshold | Interpretasi |
@@ -308,7 +386,10 @@ hott_kernel.py establish src
 hott_kernel.py impact <file> src
 hott_kernel.py outline <file> src
 hott_kernel.py brief <file> src --output summary
+hott_kernel.py context "<query>" src [--target file[,file]] [--budget-tokens 1200] [--max-hops 2] [--detail outline|source] [--output prompt|summary|full]
 hott_kernel.py analyzers
+hott_kernel.py cache status|refresh|clear src
+hott_kernel.py analyze src --output summary --cache-mode auto|refresh|off
 ```
 
 ### Memory Operations
@@ -395,20 +476,29 @@ python3 tools/ai_studio_tool/fixture_check.py
 
 ## 8. FILE STRUCTURE
 
+`tools/ai_studio_tool/` adalah batas distribusi portabel. Angular/REST demo
+berada di luar folder ini dan hanya boleh bergantung pada kernel, tidak sebaliknya.
+
 ```
 tools/ai_studio_tool/
 |- readme.md
 |- skill.md
 ├── hott_kernel.py                   # Unified Kernel CLI & API Entrypoint
 ├── tools_schema.json                # JSON Tool Declarations
+├── fixture_check.py                 # Self-contained portable regression
+├── fixtures_min/                    # Minimal TS/JS invariant fixtures
 │
 ├── core/                            # Shared Foundation (Layer 0)
 │   ├── shared_graph.py              # Canonical graph representation
+│   ├── graph_cache.py               # Persistent snapshot + incremental invalidation
 │   ├── analyzer_registry.py         # Registry & lifecycle management
 │   ├── synthesizer.py               # Invariant encoder & decoder steering
+│   ├── context_optimizer.py         # Query-directed quotient context + budget
 │   ├── safety.py                    # Cycle prevention & Betti validation
 │   ├── deprecation.py               # Standalone deprecation handlers
 │   └── __init__.py                  # Core exports
+│
+├── data/codebase/cache/             # Generated source snapshots; Git-ignored
 │
 ├── codebase/                        # Codebase Intelligence Domain (Layer 1)
 │   ├── topology_analyzers.py        # Circular deps, risk evaluation
@@ -484,9 +574,10 @@ tools/ai_studio_tool/
 
 ### Sebelum Edit File
 ```
-1. hott_kernel.py brief <file> src --output summary
-2. hott_kernel.py xcontext <file>  (memory context)
-3. Keputusan berdasarkan risk level + memory context
+1. hott_kernel.py context "<task>" src --target <file> --output prompt
+2. hott_kernel.py brief <file> src --output summary  (jika perlu drill-down)
+3. hott_kernel.py xcontext <file>  (memory context)
+4. Keputusan berdasarkan graph evidence + risk + memory context
 ```
 
 ### Setelah Perubahan Besar
@@ -507,4 +598,3 @@ tools/ai_studio_tool/
 ```
 
 ---
-

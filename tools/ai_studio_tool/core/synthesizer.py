@@ -42,6 +42,7 @@ def synthesize_topological_integrity(
     scan_root: str,
     ignore_dirs: Optional[List[str]] = None,
     output_mode: str = "full",
+    shared_graph: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Menjalankan sintesis integritas topologis menggunakan shared graph dan registry."""
     try:
@@ -51,7 +52,8 @@ def synthesize_topological_integrity(
         from shared_graph import build_shared_graph
         from analyzer_registry import run_analyzers
 
-    shared_graph = build_shared_graph(scan_root, ignore_dirs=ignore_dirs)
+    if shared_graph is None:
+        shared_graph = build_shared_graph(scan_root, ignore_dirs=ignore_dirs)
     analyzers_result = run_analyzers(shared_graph)
 
     # Calculate severity counts
@@ -95,20 +97,64 @@ def synthesize_topological_integrity(
 def encode_topological_invariants(
     scan_root: str,
     ignore_dirs: Optional[List[str]] = None,
+    shared_graph: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Mengencode topological fingerprint dari codebase."""
     try:
         from codebase.hott_analyzers import analyze_manifold
+        from codebase.topology_analyzers import analyze_test_reachability
         from core.shared_graph import build_shared_graph
     except ImportError:
         from hott_analyzers import analyze_manifold
+        from topology_analyzers import analyze_test_reachability
         from shared_graph import build_shared_graph
 
-    graph = build_shared_graph(scan_root, ignore_dirs=ignore_dirs)
+    graph = shared_graph
+    if graph is None:
+        graph = build_shared_graph(scan_root, ignore_dirs=ignore_dirs)
     manifold_result = analyze_manifold(graph)
+    test_reachability_result = analyze_test_reachability(graph)
     manifold = manifold_result.get("manifold", {})
     betti = manifold.get("betti_numbers", {})
     summary = manifold_result.get("summary", {})
+    cycle_basis = manifold_result.get("cycle_basis", [])
+    cycle_orientation_counts = manifold.get("cycle_orientation_counts", {})
+    topological_model = manifold_result.get("topological_model", {})
+    cycle_semantics = {
+        "model": topological_model.get("name", "dependency_multigraph_1_complex"),
+        "undirected_cycle_rank": betti.get("beta_1", 0),
+        "directed_basis_witnesses": cycle_orientation_counts.get("directed", 0),
+        "mixed_basis_witnesses": cycle_orientation_counts.get("mixed", 0),
+        "cycle_basis_complete": manifold.get("cycle_basis_complete", False),
+        "interpretation": (
+            "beta_1 counts independent cycles after import orientation is ignored; "
+            "use witness orientation or topo.circular for circular-import claims"
+        ),
+        "witnesses": [
+            {
+                "basis_index": item.get("basis_index"),
+                "orientation": item.get("orientation"),
+                "interpretation": item.get("interpretation"),
+                "closed_path": item.get("closed_path", []),
+            }
+            for item in cycle_basis
+        ],
+    }
+    test_summary = test_reachability_result.get("summary", {})
+    test_topology = {
+        "model": test_reachability_result.get("model", {}),
+        "summary": test_summary,
+        "high_influence_gaps": [
+            {
+                "file": item.get("file"),
+                "fan_in": item.get("fan_in", 0),
+                "reasons": item.get("reasons", []),
+            }
+            for item in test_reachability_result.get("findings", [])
+            if item.get("type") == "high_influence_without_test_path"
+        ],
+        "testless_components": test_reachability_result.get("testless_components", []),
+    }
 
     total_nodes = graph["summary"]["total_files"]
     total_edges = graph["summary"]["total_edges"]
@@ -150,6 +196,30 @@ def encode_topological_invariants(
         f"Archetype: {archetype}\n"
         f"Complexity: {complexity}\n"
         f"Betti: β₀={betti.get('beta_0', 1)}, β₁={betti.get('beta_1', 0)}, β₂={betti.get('beta_2', 0)}\n"
+        f"Cycle Semantics: model={cycle_semantics['model']}, "
+        f"directed_basis={cycle_semantics['directed_basis_witnesses']}, "
+        f"mixed_basis={cycle_semantics['mixed_basis_witnesses']}\n"
+        f"Interpretation: {cycle_semantics['interpretation']}\n"
+    )
+    witness_lines = [
+        f"- basis#{item['basis_index']} [{item['orientation']}]: "
+        f"{' -> '.join(item['closed_path'])}"
+        for item in cycle_semantics["witnesses"][:5]
+    ]
+    if witness_lines:
+        context_block += "Cycle Witnesses:\n" + "\n".join(witness_lines) + "\n"
+    if len(cycle_semantics["witnesses"]) > 5:
+        context_block += (
+            f"- ... {len(cycle_semantics['witnesses']) - 5} additional basis witness(es) omitted\n"
+        )
+    context_block += (
+        f"Test Topology: model=static_test_import_reachability, "
+        f"reachable={test_summary.get('statically_reachable_files', 0)}/"
+        f"{test_summary.get('total_production_files', 0)}, "
+        f"ratio={test_summary.get('static_test_reachability_ratio', 0.0)}, "
+        f"testless_components={test_summary.get('testless_component_count', 0)}, "
+        f"high_influence_gaps={test_summary.get('high_influence_without_test_path', 0)}\n"
+        "Test Interpretation: static import reachability is structural evidence, not runtime coverage.\n"
     )
 
     return {
@@ -160,14 +230,22 @@ def encode_topological_invariants(
             "normalized_vector": normalized_vec,
             "complexity_score": round(complexity, 4),
             "structural_archetype": archetype,
+            "topological_model": cycle_semantics["model"],
+            "cycle_orientation_counts": cycle_orientation_counts,
+            "static_test_reachability_ratio": test_summary.get(
+                "static_test_reachability_ratio", 0.0
+            ),
         },
         "summary": {
             "betti_numbers": betti,
             "total_files": total_nodes,
             "total_edges": total_edges,
             "average_degree": avg_degree,
+            "cycle_semantics": cycle_semantics,
             **summary,
         },
+        "cycle_semantics": cycle_semantics,
+        "test_topology": test_topology,
         "context_block": context_block,
     }
 
@@ -176,14 +254,23 @@ def establish_baseline(
     scan_root: str,
     baseline_path: Optional[str] = None,
     ignore_dirs: Optional[List[str]] = None,
+    shared_graph: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Establish and save codebase topological baseline."""
     baseline_path = baseline_path or DEFAULT_BASELINE_PATH
     _ensure_baseline_dir(baseline_path)
-    encoded = encode_topological_invariants(scan_root, ignore_dirs=ignore_dirs)
+    encoded = encode_topological_invariants(
+        scan_root,
+        ignore_dirs=ignore_dirs,
+        shared_graph=shared_graph,
+    )
     data = {
         "schema_version": "3.0.0-kernel",
-        "created_at": datetime.datetime.utcnow().isoformat() + "Z",
+        "created_at": (
+            datetime.datetime.now(datetime.timezone.utc)
+            .isoformat()
+            .replace("+00:00", "Z")
+        ),
         "scan_root": scan_root,
         "fingerprint": encoded.get("topological_fingerprint", {}),
     }
@@ -221,10 +308,15 @@ def steer_decoder(
     scan_root: str,
     baseline_path: Optional[str] = None,
     ignore_dirs: Optional[List[str]] = None,
+    shared_graph: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Generate decoder steering signals for codebase."""
     baseline_path = baseline_path or DEFAULT_BASELINE_PATH
-    current = encode_topological_invariants(scan_root, ignore_dirs=ignore_dirs)
+    current = encode_topological_invariants(
+        scan_root,
+        ignore_dirs=ignore_dirs,
+        shared_graph=shared_graph,
+    )
     curr_fp = current.get("topological_fingerprint", {})
     base = load_baseline(baseline_path)
     has_baseline = base is not None
@@ -249,6 +341,9 @@ def steer_decoder(
     complexity = curr_fp.get("complexity_score", 0.5)
     budget = "low" if complexity < 0.3 else ("medium" if complexity < 0.7 else "high")
     regrounding = dist > 0.25
+    cycle_semantics = current.get("cycle_semantics", {})
+    test_topology = current.get("test_topology", {})
+    test_summary = test_topology.get("summary", {})
 
     prompt_block = (
         f"[TOPOLOGICAL STEERING SIGNAL]\n"
@@ -256,6 +351,15 @@ def steer_decoder(
         f"Archetype: {archetype}\n"
         f"Strategy: {strategy}\n"
         f"Budget: {budget}\n"
+        f"Cycle Model: {cycle_semantics.get('model', 'unknown')}\n"
+        f"Cycle Basis: directed={cycle_semantics.get('directed_basis_witnesses', 0)}, "
+        f"mixed={cycle_semantics.get('mixed_basis_witnesses', 0)}\n"
+        f"Cycle Interpretation: {cycle_semantics.get('interpretation', '')}\n"
+        f"Test Topology: reachable={test_summary.get('statically_reachable_files', 0)}/"
+        f"{test_summary.get('total_production_files', 0)}, "
+        f"testless_components={test_summary.get('testless_component_count', 0)}, "
+        f"high_influence_gaps={test_summary.get('high_influence_without_test_path', 0)}\n"
+        "Test Interpretation: static import reachability, not runtime coverage.\n"
     )
 
     return {
@@ -277,6 +381,9 @@ def steer_decoder(
             "reasoning_budget": budget,
             "regrounding_needed": regrounding,
         },
+        "summary": current.get("summary"),
+        "cycle_semantics": cycle_semantics,
+        "test_topology": test_topology,
         "steering_prompt_block": prompt_block,
         "current_fingerprint": curr_fp,
         "baseline_fingerprint": base_fp if has_baseline else None,

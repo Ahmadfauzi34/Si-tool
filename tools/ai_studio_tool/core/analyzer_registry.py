@@ -14,6 +14,7 @@ try:
     from codebase.topology_analyzers import (
         analyze_circular,
         analyze_risk,
+        analyze_test_reachability,
     )
     TOPO_ANALYZERS_AVAILABLE = True
 except ImportError:
@@ -21,6 +22,7 @@ except ImportError:
         from topology_analyzers import (
             analyze_circular,
             analyze_risk,
+            analyze_test_reachability,
         )
         TOPO_ANALYZERS_AVAILABLE = True
     except ImportError:
@@ -143,13 +145,19 @@ def analyze_entrypoint_impact(shared_graph: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-# Register all 12 analyzers
+# Register all 13 analyzers
 register_analyzer("topo.orphan", analyze_orphan, "Deteksi unreferenced/orphan source files", "topology")
 register_analyzer("topo.entrypoint", analyze_entrypoint_impact, "Deteksi entry points dan transitively reachable files", "topology")
 
 if TOPO_ANALYZERS_AVAILABLE:
     register_analyzer("topo.circular", analyze_circular, "Deteksi circular import dependencies (cycle basis)", "topology")
     register_analyzer("topo.risk", analyze_risk, "Evaluasi change risk per file (fan-in, boundary, entrypoint)", "topology")
+    register_analyzer(
+        "topo.test_reachability",
+        analyze_test_reachability,
+        "Petakan static import reachability dari test ke source (bukan runtime coverage)",
+        "topology",
+    )
 
 if PERF_ANALYZERS_AVAILABLE:
     register_analyzer("perf.async", analyze_async_waterfall, "Deteksi sequential await di loop dan waterfall async", "performance")
@@ -185,24 +193,36 @@ def run_analyzers(
     """
     to_run = analyzer_names if analyzer_names is not None else get_available_analyzers()
     results: Dict[str, Any] = {}
+    errors: Dict[str, str] = {}
+    succeeded: List[str] = []
     
     for name in to_run:
         entry = ANALYZER_REGISTRY.get(name)
         if not entry:
-            results[name] = {"error": f"Analyzer '{name}' not found in registry"}
+            message = f"Analyzer '{name}' not found in registry"
+            results[name] = {"error": message, "analyzer": name}
+            errors[name] = message
             continue
         
         fn = entry.get("fn")
-        if not fn:
-            results[name] = {"error": f"Analyzer function for '{name}' is not callable"}
+        if not callable(fn):
+            message = f"Analyzer function for '{name}' is not callable"
+            results[name] = {"error": message, "analyzer": name}
+            errors[name] = message
             continue
         
         try:
             results[name] = fn(shared_graph)
+            succeeded.append(name)
         except Exception as exc:
-            results[name] = {"error": str(exc), "analyzer": name}
+            message = str(exc)
+            results[name] = {"error": message, "analyzer": name}
+            errors[name] = message
             
     return {
         "analyzers_run": list(results.keys()),
+        "analyzers_succeeded": succeeded,
+        "analyzers_failed": len(errors),
+        "errors": errors,
         "results": results,
     }

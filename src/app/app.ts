@@ -114,7 +114,7 @@ export class App implements OnInit {
         supported: false,
         runtime: 'Python 3',
         version: 'Unknown',
-        script: 'file_scanner.py',
+        script: 'hott_kernel.py',
         status: 'error',
         error: err.message || String(err)
       });
