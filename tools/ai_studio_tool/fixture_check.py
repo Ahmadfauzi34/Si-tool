@@ -1738,6 +1738,89 @@ def test_kernel_wiring_smoke():
     )
 
 
+def test_rest_api_kernel_wiring():
+    """Pastikan REST API hanya merutekan request ke canonical kernel."""
+    server_path = ROOT.parent.parent / "src" / "server.ts"
+    app_path = ROOT.parent.parent / "src" / "app" / "app.ts"
+    server_source = server_path.read_text(encoding="utf-8")
+    app_source = app_path.read_text(encoding="utf-8")
+
+    legacy_scripts = {
+        "file_scanner.py",
+        "async_waterfall_detector.py",
+        "deopt_checker.py",
+        "gc_pressure_analyzer.py",
+        "cache_auditor.py",
+        "type_isomorphism_observer.py",
+        "boundary_sheaf_checker.py",
+        "homotopy_path_observer.py",
+        "topological_integrity_orchestrator.py",
+        "topological_manifold_builder.py",
+        "invariant_encoder.py",
+        "decoder_steering.py",
+    }
+    for script_name in sorted(legacy_scripts):
+        expect(
+            script_name not in server_source,
+            f"REST: server masih merujuk legacy script {script_name}",
+        )
+
+    expect("hott_kernel.py" in server_source, "REST: canonical kernel harus digunakan")
+    expect("hott_kernel.py" in app_source, "REST: fallback UI harus menyebut canonical kernel")
+
+    routes = {
+        "/api/python-info",
+        "/api/topology",
+        "/api/impact",
+        "/api/outline",
+        "/api/brief",
+        "/api/async-detector",
+        "/api/deopt-checker",
+        "/api/gc-pressure",
+        "/api/cache-auditor",
+        "/api/type-isomorphism",
+        "/api/boundary-sheaf",
+        "/api/homotopy-paths",
+        "/api/topological-integrity",
+        "/api/topological-manifold",
+        "/api/topological-fingerprint",
+        "/api/decoder-steering",
+    }
+    for route in sorted(routes):
+        expect(route in server_source, f"REST: route hilang setelah migrasi: {route}")
+
+    analyzer_names = (
+        "perf.async",
+        "perf.deopt",
+        "perf.gc",
+        "perf.cache",
+        "hott.isomorphism",
+        "hott.sheaf",
+        "hott.homotopy",
+        "hott.manifold",
+    )
+    for analyzer_name in analyzer_names:
+        expect(
+            analyzer_name in server_source,
+            f"REST: mapping analyzer hilang: {analyzer_name}",
+        )
+
+    for analyzer_name in analyzer_names:
+        result = _run_kernel(
+            "analyze",
+            "fixtures_min/f16_file_brief/project",
+            "--analyzers",
+            analyzer_name,
+            "--output",
+            "findings",
+        )
+        analyzer_results = result.get("analyzers", {}).get("results", {})
+        expect(
+            analyzer_name in analyzer_results,
+            f"REST: command mapping kernel gagal untuk {analyzer_name}",
+        )
+
+
 def main():
     write_fixtures()
 
@@ -1771,6 +1854,7 @@ def main():
         test_f30_complexity_calibration,
         test_f31_memory_topology_betti,
         test_kernel_wiring_smoke,
+        test_rest_api_kernel_wiring,
     ]
 
     for test in tests:
@@ -1785,7 +1869,7 @@ def main():
             print(f"- {failure}")
         sys.exit(1)
 
-    print("PASS: 28 fixture minimal + 1 kernel wiring smoke aman")
+    print("PASS: 28 fixture minimal + 2 integration smoke aman")
 
 
 if __name__ == "__main__":
