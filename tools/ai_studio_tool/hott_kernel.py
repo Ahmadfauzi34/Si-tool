@@ -23,13 +23,14 @@ if _SCRIPT_DIR not in sys.path:
     sys.path.insert(0, _SCRIPT_DIR)
 
 try:
-    from core.shared_graph import build_shared_graph
+    from core.shared_graph import SOURCE_EXTENSIONS, build_shared_graph
     SHARED_GRAPH_AVAILABLE = True
 except ImportError:
     try:
-        from shared_graph import build_shared_graph
+        from shared_graph import SOURCE_EXTENSIONS, build_shared_graph
         SHARED_GRAPH_AVAILABLE = True
     except ImportError:
+        SOURCE_EXTENSIONS = (".ts", ".tsx", ".js", ".jsx")
         SHARED_GRAPH_AVAILABLE = False
 
 try:
@@ -179,6 +180,82 @@ except ImportError:
         KAN_EXTENSION_AVAILABLE = True
     except ImportError:
         KAN_EXTENSION_AVAILABLE = False
+
+
+CODEBASE_SCHEMA_VERSION = "3.0.0-kernel"
+
+
+def _utc_timestamp() -> str:
+    """Return an explicit UTC timestamp without deprecated naive datetime APIs."""
+    return datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _kernel_error(error_code: str, message: str, **details: Any) -> Dict[str, Any]:
+    """Build a stable machine-readable error payload for CLI and API callers."""
+    return {
+        "schema_version": CODEBASE_SCHEMA_VERSION,
+        "error": message,
+        "error_code": error_code,
+        **details,
+    }
+
+
+def _validate_scan_root(scan_root: str) -> Optional[Dict[str, Any]]:
+    if not os.path.exists(scan_root):
+        return _kernel_error(
+            "scan_root_not_found",
+            f"Scan root does not exist: {scan_root}",
+            scan_root=scan_root,
+        )
+    if not os.path.isdir(scan_root):
+        return _kernel_error(
+            "scan_root_not_directory",
+            f"Scan root is not a directory: {scan_root}",
+            scan_root=scan_root,
+        )
+    return None
+
+
+def _validate_output_mode(
+    output_mode: str,
+    allowed: tuple[str, ...],
+) -> Optional[Dict[str, Any]]:
+    if output_mode in allowed:
+        return None
+    return _kernel_error(
+        "invalid_output_mode",
+        f"Invalid output mode: {output_mode}",
+        output_mode=output_mode,
+        supported_output_modes=list(allowed),
+    )
+
+
+def _analysis_status(total_files: int, analyzers_failed: int = 0) -> Dict[str, Any]:
+    """Describe whether a supported TS/JS analysis domain was discovered."""
+    if total_files <= 0:
+        state = "empty"
+    elif analyzers_failed > 0:
+        state = "partial"
+    else:
+        state = "complete"
+    status = {
+        "analysis_status": state,
+        "supported_source_extensions": list(SOURCE_EXTENSIONS),
+    }
+    if total_files == 0:
+        status["analysis_warning"] = (
+            "No supported TypeScript/JavaScript source files were found in scan_root."
+        )
+    return status
+
+
+def _emit_cli_result(result: Dict[str, Any]) -> None:
+    """Print one JSON result and expose a reliable status to Bash callers."""
+    print(json.dumps(result, indent=2))
+    if result.get("error"):
+        raise SystemExit(2)
+    if result.get("unified_summary", {}).get("analyzers_failed", 0) > 0:
+        raise SystemExit(3)
 
 
 def kernel_memory_store(
@@ -1063,6 +1140,16 @@ def kernel_analyze(
     if not SHARED_GRAPH_AVAILABLE:
         return {"error": "shared_graph module not found", "available": False}
 
+    root_error = _validate_scan_root(scan_root)
+    if root_error:
+        return root_error
+    output_error = _validate_output_mode(
+        output_mode,
+        ("full", "summary", "findings", "graph"),
+    )
+    if output_error:
+        return output_error
+
     # Step 1: Build SharedGraph (1x scan, 1x graph build)
     shared_graph = build_shared_graph(scan_root)
 
@@ -1097,6 +1184,11 @@ def kernel_analyze(
         "findings_by_severity": _count_findings_by_severity(analyzer_output),
         "analyzers_run": analyzer_output.get("analyzers_run", 0),
         "analyzers_failed": analyzer_output.get("analyzers_failed", 0),
+        "analyzer_errors": analyzer_output.get("errors", {}),
+        **_analysis_status(
+            shared_graph["summary"]["total_files"],
+            analyzer_output.get("analyzers_failed", 0),
+        ),
     }
 
     base = {
@@ -1104,7 +1196,7 @@ def kernel_analyze(
         "mode": "analyze",
         "output_mode": output_mode,
         "scan_root": scan_root,
-        "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
+        "timestamp": _utc_timestamp(),
     }
 
     # Step 4: Filter output berdasarkan mode
@@ -1145,6 +1237,13 @@ def kernel_impact(
     if not SHARED_GRAPH_AVAILABLE or not TOPO_QUERIES_AVAILABLE:
         return {"error": "required modules not available"}
 
+    root_error = _validate_scan_root(scan_root)
+    if root_error:
+        return root_error
+    output_error = _validate_output_mode(output_mode, ("full", "summary"))
+    if output_error:
+        return output_error
+
     graph = build_shared_graph(scan_root)
     result = query_impact(graph, target_file)
 
@@ -1176,6 +1275,10 @@ def kernel_outline(
     if not SHARED_GRAPH_AVAILABLE or not TOPO_QUERIES_AVAILABLE:
         return {"error": "required modules not available"}
 
+    root_error = _validate_scan_root(scan_root)
+    if root_error:
+        return root_error
+
     graph = build_shared_graph(scan_root)
     result = query_outline(graph, target_file)
 
@@ -1194,6 +1297,13 @@ def kernel_brief(
     """Targeted brief (outline + impact) via SharedGraph."""
     if not SHARED_GRAPH_AVAILABLE or not TOPO_QUERIES_AVAILABLE:
         return {"error": "required modules not available"}
+
+    root_error = _validate_scan_root(scan_root)
+    if root_error:
+        return root_error
+    output_error = _validate_output_mode(output_mode, ("full", "summary"))
+    if output_error:
+        return output_error
 
     graph = build_shared_graph(scan_root)
     result = query_brief(graph, target_file)
@@ -1227,6 +1337,9 @@ def kernel_establish(
     """Establish topological baseline via decoder_steering."""
     if not STEERING_AVAILABLE:
         return {"error": "steering module not available"}
+    root_error = _validate_scan_root(scan_root)
+    if root_error:
+        return root_error
     result = establish_baseline(scan_root, baseline_path)
     return {
         "schema_version": "3.0.0-kernel",
@@ -1330,6 +1443,16 @@ def kernel_synthesize(
     if not SHARED_GRAPH_AVAILABLE or not REGISTRY_AVAILABLE:
         return {"error": "required modules not available", "available": False}
 
+    root_error = _validate_scan_root(scan_root)
+    if root_error:
+        return root_error
+    output_error = _validate_output_mode(
+        output_mode,
+        ("full", "summary", "findings"),
+    )
+    if output_error:
+        return output_error
+
     # Step 1: Build SharedGraph (1x scan)
     graph = build_shared_graph(scan_root)
 
@@ -1371,6 +1494,11 @@ def kernel_synthesize(
         "analyzers_run": analyzer_output.get("analyzers_run", 0),
         "analyzers_failed": analyzer_output.get("analyzers_failed", 0),
         "topological_health_score": health_score,
+        "analyzer_errors": analyzer_output.get("errors", {}),
+        **_analysis_status(
+            total_files,
+            analyzer_output.get("analyzers_failed", 0),
+        ),
     }
 
     if output_mode == "summary":
@@ -1418,6 +1546,13 @@ def kernel_steer(
     if not STEERING_AVAILABLE:
         return {"error": "steering module not available"}
 
+    root_error = _validate_scan_root(scan_root)
+    if root_error:
+        return root_error
+    output_error = _validate_output_mode(output_mode, ("full", "summary"))
+    if output_error:
+        return output_error
+
     result = steer_decoder(scan_root, baseline_path)
 
     if output_mode == "summary":
@@ -1438,7 +1573,7 @@ def kernel_steer(
 
 
 def main():
-    if len(sys.argv) < 2:
+    if len(sys.argv) < 2 or sys.argv[1] in ("--help", "-h", "help"):
         print(json.dumps({
             "tool": "hott_kernel",
             "schema_version": "4.0.0-kernel",
@@ -1498,24 +1633,33 @@ def main():
                 output_mode = sys.argv[i + 1]
 
         if output_mode not in ("full", "summary", "findings", "graph"):
-            print(json.dumps({"error": f"Invalid output mode: {output_mode}"}))
-            return
+            _emit_cli_result(_kernel_error(
+                "invalid_output_mode",
+                f"Invalid output mode: {output_mode}",
+                output_mode=output_mode,
+                supported_output_modes=["full", "summary", "findings", "graph"],
+            ))
 
         result = kernel_analyze(root, analyzers, output_mode)
-        print(json.dumps(result, indent=2))
+        _emit_cli_result(result)
 
     elif mode == "analyzers":
         if REGISTRY_AVAILABLE:
-            print(json.dumps({
+            _emit_cli_result({
                 "available_analyzers": get_available_analyzers(),
-            }, indent=2))
+            })
         else:
-            print(json.dumps({"error": "registry not available"}))
+            _emit_cli_result(_kernel_error(
+                "registry_unavailable",
+                "registry not available",
+            ))
 
     elif mode == "impact":
         if len(sys.argv) < 3:
-            print(json.dumps({"error": "Usage: hott_kernel.py impact <file> [root]"}))
-            return
+            _emit_cli_result(_kernel_error(
+                "missing_argument",
+                "Usage: hott_kernel.py impact <file> [root]",
+            ))
         target = sys.argv[2]
         root = sys.argv[3] if len(sys.argv) > 3 and not sys.argv[3].startswith("--") else "."
         output_mode = "full"
@@ -1523,21 +1667,25 @@ def main():
             if arg == "--output" and i + 1 < len(sys.argv):
                 output_mode = sys.argv[i + 1]
         result = kernel_impact(root, target, output_mode)
-        print(json.dumps(result, indent=2))
+        _emit_cli_result(result)
 
     elif mode == "outline":
         if len(sys.argv) < 3:
-            print(json.dumps({"error": "Usage: hott_kernel.py outline <file> [root]"}))
-            return
+            _emit_cli_result(_kernel_error(
+                "missing_argument",
+                "Usage: hott_kernel.py outline <file> [root]",
+            ))
         target = sys.argv[2]
         root = sys.argv[3] if len(sys.argv) > 3 and not sys.argv[3].startswith("--") else "."
         result = kernel_outline(root, target)
-        print(json.dumps(result, indent=2))
+        _emit_cli_result(result)
 
     elif mode == "brief":
         if len(sys.argv) < 3:
-            print(json.dumps({"error": "Usage: hott_kernel.py brief <file> [root]"}))
-            return
+            _emit_cli_result(_kernel_error(
+                "missing_argument",
+                "Usage: hott_kernel.py brief <file> [root]",
+            ))
         target = sys.argv[2]
         root = sys.argv[3] if len(sys.argv) > 3 and not sys.argv[3].startswith("--") else "."
         output_mode = "full"
@@ -1545,7 +1693,7 @@ def main():
             if arg == "--output" and i + 1 < len(sys.argv):
                 output_mode = sys.argv[i + 1]
         result = kernel_brief(root, target, output_mode)
-        print(json.dumps(result, indent=2))
+        _emit_cli_result(result)
 
     elif mode == "establish":
         root = sys.argv[2] if len(sys.argv) > 2 and not sys.argv[2].startswith("--") else "."
@@ -1554,7 +1702,7 @@ def main():
             if arg == "--baseline" and i + 1 < len(sys.argv):
                 baseline_path = sys.argv[i + 1]
         result = kernel_establish(root, baseline_path)
-        print(json.dumps(result, indent=2))
+        _emit_cli_result(result)
 
     elif mode == "synthesize":
         root = sys.argv[2] if len(sys.argv) > 2 and not sys.argv[2].startswith("--") else "."
@@ -1563,7 +1711,7 @@ def main():
             if arg == "--output" and i + 1 < len(sys.argv):
                 output_mode = sys.argv[i + 1]
         result = kernel_synthesize(root, output_mode)
-        print(json.dumps(result, indent=2))
+        _emit_cli_result(result)
 
     elif mode == "steer":
         root = sys.argv[2] if len(sys.argv) > 2 and not sys.argv[2].startswith("--") else "."
@@ -1575,7 +1723,7 @@ def main():
             elif arg == "--baseline" and i + 1 < len(sys.argv):
                 baseline_path = sys.argv[i + 1]
         result = kernel_steer(root, baseline_path, output_mode)
-        print(json.dumps(result, indent=2))
+        _emit_cli_result(result)
 
     elif mode == "memory_store":
         if len(sys.argv) < 4:
@@ -2038,7 +2186,11 @@ def main():
             print(json.dumps(result, indent=2))
 
     else:
-        print(json.dumps({"error": f"Unknown mode: {mode}"}))
+        _emit_cli_result(_kernel_error(
+            "unknown_mode",
+            f"Unknown mode: {mode}",
+            mode=mode,
+        ))
 
 
 
