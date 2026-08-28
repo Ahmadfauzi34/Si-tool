@@ -185,24 +185,36 @@ def run_analyzers(
     """
     to_run = analyzer_names if analyzer_names is not None else get_available_analyzers()
     results: Dict[str, Any] = {}
+    errors: Dict[str, str] = {}
+    succeeded: List[str] = []
     
     for name in to_run:
         entry = ANALYZER_REGISTRY.get(name)
         if not entry:
-            results[name] = {"error": f"Analyzer '{name}' not found in registry"}
+            message = f"Analyzer '{name}' not found in registry"
+            results[name] = {"error": message, "analyzer": name}
+            errors[name] = message
             continue
         
         fn = entry.get("fn")
-        if not fn:
-            results[name] = {"error": f"Analyzer function for '{name}' is not callable"}
+        if not callable(fn):
+            message = f"Analyzer function for '{name}' is not callable"
+            results[name] = {"error": message, "analyzer": name}
+            errors[name] = message
             continue
         
         try:
             results[name] = fn(shared_graph)
+            succeeded.append(name)
         except Exception as exc:
-            results[name] = {"error": str(exc), "analyzer": name}
+            message = str(exc)
+            results[name] = {"error": message, "analyzer": name}
+            errors[name] = message
             
     return {
         "analyzers_run": list(results.keys()),
+        "analyzers_succeeded": succeeded,
+        "analyzers_failed": len(errors),
+        "errors": errors,
         "results": results,
     }

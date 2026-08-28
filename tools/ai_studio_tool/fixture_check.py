@@ -1738,6 +1738,79 @@ def test_kernel_wiring_smoke():
     )
 
 
+def test_kernel_cli_contract():
+    """Kunci validasi input dan status analyzer untuk pemanggil Bash/API."""
+    env = dict(os.environ)
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+
+    def run_raw(*args):
+        completed = subprocess.run(
+            [sys.executable, str(ROOT / "hott_kernel.py"), *args],
+            cwd=ROOT,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        try:
+            payload = json.loads(completed.stdout)
+        except json.JSONDecodeError as exc:
+            expect(False, f"CLI: {' '.join(args)} bukan JSON valid: {exc}")
+            return completed, {}
+        return completed, payload
+
+    completed, help_payload = run_raw("--help")
+    expect(completed.returncode == 0, "CLI: --help harus sukses")
+    expect(not help_payload.get("error"), "CLI: --help tidak boleh menjadi error")
+    expect("analyze" in help_payload.get("usage", {}), "CLI: help harus memuat analyze")
+
+    project = "fixtures_min/f16_file_brief/project"
+    completed, invalid_analyzer = run_raw(
+        "analyze",
+        project,
+        "--analyzers",
+        "tidak.ada",
+        "--output",
+        "summary",
+    )
+    summary = invalid_analyzer.get("unified_summary", {})
+    expect(completed.returncode == 3, "CLI: partial analyzer result harus memakai exit code 3")
+    expect(summary.get("analyzers_failed") == 1, "CLI: analyzer invalid harus dihitung gagal")
+    expect(summary.get("analysis_status") == "partial", "CLI: analyzer gagal harus berstatus partial")
+    expect(
+        "tidak.ada" in summary.get("analyzer_errors", {}),
+        "CLI: alasan analyzer gagal harus tersedia untuk pemanggil",
+    )
+
+    completed, missing_root = run_raw("synthesize", "direktori-yang-tidak-ada", "--output", "summary")
+    expect(completed.returncode == 2, "CLI: input error harus memakai exit code 2")
+    expect(
+        missing_root.get("error_code") == "scan_root_not_found",
+        "CLI: root yang tidak ada harus ditolak eksplisit",
+    )
+
+    completed, invalid_output = run_raw("synthesize", project, "--output", "bukan-mode")
+    expect(completed.returncode == 2, "CLI: output mode invalid harus memakai exit code 2")
+    expect(
+        invalid_output.get("error_code") == "invalid_output_mode",
+        "CLI: output mode invalid harus ditolak eksplisit",
+    )
+
+    _, empty_analysis = run_raw("analyze", ".", "--output", "summary")
+    empty_summary = empty_analysis.get("unified_summary", {})
+    expect(empty_summary.get("analysis_status") == "empty", "CLI: domain tanpa TS/JS harus ditandai empty")
+    expect(
+        ".py" not in empty_summary.get("supported_source_extensions", []),
+        "CLI: dukungan Python tidak boleh aktif secara implisit",
+    )
+
+    completed, _ = run_raw("analyze", project, "--output", "summary")
+    expect(
+        "DeprecationWarning" not in completed.stderr,
+        "CLI: analisis tidak boleh menghasilkan warning datetime deprecated",
+    )
+
+
 def test_rest_api_kernel_wiring():
     """Pastikan REST API hanya merutekan request ke canonical kernel."""
     server_path = ROOT.parent.parent / "src" / "server.ts"
@@ -1854,6 +1927,7 @@ def main():
         test_f30_complexity_calibration,
         test_f31_memory_topology_betti,
         test_kernel_wiring_smoke,
+        test_kernel_cli_contract,
         test_rest_api_kernel_wiring,
     ]
 
@@ -1869,7 +1943,7 @@ def main():
             print(f"- {failure}")
         sys.exit(1)
 
-    print("PASS: 28 fixture minimal + 2 integration smoke aman")
+    print("PASS: 28 fixture minimal + 3 integration smoke aman")
 
 
 if __name__ == "__main__":

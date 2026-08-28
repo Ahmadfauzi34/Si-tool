@@ -360,7 +360,11 @@ def build_shared_graph(
     return {
         "schema_version": SCHEMA_VERSION,
         "scan_root": scan_root_norm,
-        "scan_timestamp": datetime.datetime.utcnow().isoformat() + "Z",
+        "scan_timestamp": (
+            datetime.datetime.now(datetime.timezone.utc)
+            .isoformat()
+            .replace("+00:00", "Z")
+        ),
 
         # Core topology
         "vertices": sorted(all_files),

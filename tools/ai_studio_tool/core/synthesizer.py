@@ -183,7 +183,11 @@ def establish_baseline(
     encoded = encode_topological_invariants(scan_root, ignore_dirs=ignore_dirs)
     data = {
         "schema_version": "3.0.0-kernel",
-        "created_at": datetime.datetime.utcnow().isoformat() + "Z",
+        "created_at": (
+            datetime.datetime.now(datetime.timezone.utc)
+            .isoformat()
+            .replace("+00:00", "Z")
+        ),
         "scan_root": scan_root,
         "fingerprint": encoded.get("topological_fingerprint", {}),
     }
