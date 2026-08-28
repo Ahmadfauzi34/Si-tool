@@ -1348,7 +1348,7 @@ def kernel_establish(
 
 
 def _compute_topological_health_score(analyzer_output: Dict[str, Any], total_files: int) -> float:
-    """Hitung health score (0.0 to 1.0] dari seluruh 12 analyzer."""
+    """Hitung health score (0.0 to 1.0] dari seluruh 13 analyzer."""
     if total_files <= 0:
         return 1.0
     weights = {"high": 3, "medium": 2, "low": 1, "info": 0}
@@ -1427,6 +1427,26 @@ def _detect_cross_analyzer_correlations(
                 "observation": f"High change risk detected on '{f_path}' affecting entrypoints.",
             })
 
+    # 4. Change risk without a static test-import witness
+    test_reachability = results.get("topo.test_reachability", {})
+    unreachable_from_tests = set(test_reachability.get("unreachable_sources", []))
+    for finding in risk_res:
+        f_path = finding.get("file")
+        risk_level = finding.get("risk_level")
+        if f_path in unreachable_from_tests and risk_level in ("high", "medium"):
+            correlations.append({
+                "type": "change_risk_without_test_path",
+                "severity": risk_level,
+                "file": f_path,
+                "risk_score": finding.get("risk_score", 0),
+                "risk_reasons": finding.get("reasons", []),
+                "test_model": "static_test_import_reachability",
+                "observation": (
+                    f"'{f_path}' has {risk_level} change risk but no static import "
+                    "path from a supported test file. This is not runtime coverage evidence."
+                ),
+            })
+
     correlations.sort(key=lambda c: (c.get("severity", ""), c.get("type", ""), c.get("file", "")))
     return correlations
 
@@ -1437,7 +1457,7 @@ def kernel_synthesize(
     analyzer_names: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """
-    Synthesis: SEMUA 12 analyzer + fingerprint + health + correlations.
+    Synthesis: SEMUA 13 analyzer + fingerprint + health + correlations.
     Menggunakan analyzer_registry.
     """
     if not SHARED_GRAPH_AVAILABLE or not REGISTRY_AVAILABLE:
@@ -1456,7 +1476,7 @@ def kernel_synthesize(
     # Step 1: Build SharedGraph (1x scan)
     graph = build_shared_graph(scan_root)
 
-    # Step 2: Run ALL 12 analyzers
+    # Step 2: Run ALL 13 analyzers
     analyzer_output = run_analyzers(graph, analyzer_names)
     results = analyzer_output.get("results", {})
 
@@ -1564,6 +1584,7 @@ def kernel_steer(
             "summary": result.get("summary"),
             "steering_signals": result.get("steering_signals"),
             "cycle_semantics": result.get("cycle_semantics"),
+            "test_topology": result.get("test_topology"),
             "steering_prompt_block": result.get("steering_prompt_block"),
         }
 

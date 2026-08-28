@@ -489,6 +489,36 @@ FIXTURES = {
         "import './a';\n"
         "export const b = true;\n"
     ),
+    # F33 static test import reachability (not runtime coverage)
+    Path("fixtures_min/f33_test_reachability/project/src/app.spec.ts"): (
+        "import './app';\n"
+        "export const appSpec = true;\n"
+    ),
+    Path("fixtures_min/f33_test_reachability/project/src/app.ts"): (
+        "import './service';\n"
+        "export const app = true;\n"
+    ),
+    Path("fixtures_min/f33_test_reachability/project/src/service.ts"): (
+        "import './core';\n"
+        "export const service = true;\n"
+    ),
+    Path("fixtures_min/f33_test_reachability/project/src/core.ts"): (
+        "export const core = true;\n"
+    ),
+    Path("fixtures_min/f33_test_reachability/project/src/critical.ts"): (
+        "export const critical = true;\n"
+    ),
+    Path("fixtures_min/f33_test_reachability/project/src/consumer-a.ts"): (
+        "import './critical';\n"
+        "export const consumerA = true;\n"
+    ),
+    Path("fixtures_min/f33_test_reachability/project/src/consumer-b.ts"): (
+        "import './critical';\n"
+        "export const consumerB = true;\n"
+    ),
+    Path("fixtures_min/f33_test_reachability/project/src/orphan.spec.ts"): (
+        "export const orphanSpec = true;\n"
+    ),
 }
 
 FAILURES = []
@@ -1735,6 +1765,47 @@ def test_f32_reciprocal_cycle_basis():
     )
 
 
+def test_f33_static_test_reachability():
+    name = "F33"
+    scan_root = "fixtures_min/f33_test_reachability/project/src"
+    from core.shared_graph import build_shared_graph
+    from codebase.topology_analyzers import analyze_test_reachability
+
+    result = analyze_test_reachability(build_shared_graph(scan_root))
+    summary = result.get("summary", {})
+    expect(summary.get("total_tests") == 2, f"{name}: harus ada dua test file")
+    expect(summary.get("total_production_files") == 6, f"{name}: harus ada enam source file")
+    expect(summary.get("directly_tested_files") == 1, f"{name}: hanya app.ts yang direct target")
+    expect(summary.get("statically_reachable_files") == 3, f"{name}: app/service/core harus reachable")
+    expect(summary.get("statically_unreachable_files") == 3, f"{name}: tiga source harus unreachable")
+    expect(summary.get("static_test_reachability_ratio") == 0.5, f"{name}: ratio harus 0.5")
+    expect(summary.get("testless_component_count") == 1, f"{name}: harus ada satu testless component")
+    expect(summary.get("high_influence_without_test_path") == 1, f"{name}: critical harus high influence gap")
+    expect(summary.get("isolated_test_count") == 1, f"{name}: orphan.spec harus isolated")
+
+    core_file = f"{scan_root}/core.ts"
+    app_test = f"{scan_root}/app.spec.ts"
+    witness = result.get("source_test_witnesses", {}).get(core_file, [])
+    expect(len(witness) == 1, f"{name}: core.ts harus punya satu test witness")
+    expect(
+        witness[0].get("path") == [
+            app_test,
+            f"{scan_root}/app.ts",
+            f"{scan_root}/service.ts",
+            core_file,
+        ],
+        f"{name}: path test ke core harus lengkap dan directional",
+    )
+    expect(
+        result.get("model", {}).get("not_runtime_coverage") is True,
+        f"{name}: output harus menolak klaim runtime coverage",
+    )
+    expect(
+        f"{scan_root}/critical.ts" in result.get("unreachable_sources", []),
+        f"{name}: critical.ts harus tidak terjangkau test",
+    )
+
+
 def test_f31_memory_topology_betti():
     name = "F31"
     from memory.graph import build_memory_graph_from_data
@@ -1797,9 +1868,13 @@ def _run_kernel(*args):
 def test_kernel_wiring_smoke():
     """Kunci jalur CLI read-only yang rentan rusak setelah reorganisasi modul."""
     analyzers = _run_kernel("analyzers").get("available_analyzers", [])
-    expect(len(analyzers) == 12, "KERNEL: semua 12 codebase analyzer harus aktif")
+    expect(len(analyzers) == 13, "KERNEL: semua 13 codebase analyzer harus aktif")
     expect("topo.circular" in analyzers, "KERNEL: topo.circular harus terdaftar")
     expect("topo.risk" in analyzers, "KERNEL: topo.risk harus terdaftar")
+    expect(
+        "topo.test_reachability" in analyzers,
+        "KERNEL: topo.test_reachability harus terdaftar",
+    )
 
     project = "fixtures_min/f16_file_brief/project"
     target = f"{project}/src/app.ts"
@@ -1933,6 +2008,7 @@ def main():
         test_f30_complexity_calibration,
         test_f31_memory_topology_betti,
         test_f32_reciprocal_cycle_basis,
+        test_f33_static_test_reachability,
         test_kernel_wiring_smoke,
         test_kernel_cli_contract,
     ]
@@ -1949,7 +2025,7 @@ def main():
             print(f"- {failure}")
         sys.exit(1)
 
-    print("PASS: 29 fixture minimal + 2 portable integration smoke aman")
+    print("PASS: 30 fixture minimal + 2 portable integration smoke aman")
 
 
 if __name__ == "__main__":
