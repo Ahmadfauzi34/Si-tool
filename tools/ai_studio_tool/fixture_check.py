@@ -480,6 +480,15 @@ FIXTURES = {
     Path("fixtures_min/f30_complexity_calibration/project/src/b.ts"): (
         "export const b = true;\n"
     ),
+    # F32 reciprocal imports are parallel 1-cells after orientation is forgotten
+    Path("fixtures_min/f32_reciprocal_cycle/project/src/a.ts"): (
+        "import './b';\n"
+        "export const a = true;\n"
+    ),
+    Path("fixtures_min/f32_reciprocal_cycle/project/src/b.ts"): (
+        "import './a';\n"
+        "export const b = true;\n"
+    ),
 }
 
 FAILURES = []
@@ -1446,6 +1455,7 @@ def test_f26_topological_manifold():
     scan_root = f"{project}/src"
     from core.shared_graph import build_shared_graph
     from codebase.hott_analyzers import analyze_manifold
+    from codebase.topology_analyzers import analyze_circular
 
     sg = build_shared_graph(scan_root)
     result = analyze_manifold(sg)
@@ -1463,6 +1473,31 @@ def test_f26_topological_manifold():
     expect(
         betti["beta_0"] == 1,
         f"{name}: β₀ harus 1 (terhubung penuh)"
+    )
+    expect(
+        betti["beta_1"] == 1,
+        f"{name}: β₁ harus 1 untuk triangle DAG pada underlying undirected graph"
+    )
+
+    basis = result.get("cycle_basis", [])
+    expect(len(basis) == 1, f"{name}: harus ada satu cycle-basis witness")
+    expect(
+        basis[0].get("orientation") == "mixed",
+        f"{name}: triangle DAG bukan circular import berarah",
+    )
+    circular = analyze_circular(sg)
+    expect(
+        circular.get("summary", {}).get("total_cycles") == 0,
+        f"{name}: β₁ undirected tidak boleh dianggap circular import",
+    )
+    model = result.get("topological_model", {})
+    expect(
+        model.get("name") == "dependency_multigraph_1_complex",
+        f"{name}: model topologi harus dinyatakan eksplisit",
+    )
+    expect(
+        model.get("edge_orientation_for_betti") == "ignored",
+        f"{name}: orientasi edge harus dinyatakan diabaikan untuk Betti",
     )
 
     expect(
@@ -1507,6 +1542,11 @@ def test_f27_invariant_encoder():
     context_block = result.get("context_block", "")
     expect("[TOPOLOGICAL FINGERPRINT]" in context_block, f"{name}: context block harus ada")
     expect(hash1 in context_block, f"{name}: context block harus berisi signature")
+    expect("Cycle Semantics:" in context_block, f"{name}: context block harus menjelaskan cycle semantics")
+    expect(
+        result.get("cycle_semantics", {}).get("model") == "dependency_multigraph_1_complex",
+        f"{name}: encoder harus meneruskan model topologi",
+    )
 
 
 def test_f28_decoder_steering():
@@ -1574,6 +1614,10 @@ def test_f28_decoder_steering():
         steer_result["current_fingerprint"]["signature_hash"] in prompt_block,
         f"{name}: prompt block harus berisi signature"
     )
+    expect(
+        "Cycle Interpretation:" in prompt_block,
+        f"{name}: steering prompt harus mencegah penyamaan β₁ dengan circular import",
+    )
 
     # Cleanup baseline
     import os as _os
@@ -1603,6 +1647,24 @@ def test_f29_archetype_calibration():
     betti = result.get("summary", {}).get("betti_numbers", {})
     expect(betti.get("beta_0") == 2, f"{name}: beta_0 harus 2 (dua komponen)")
     expect(betti.get("beta_1") == 1, f"{name}: beta_1 harus 1 (satu cycle)")
+
+    from core.shared_graph import build_shared_graph
+    from codebase.hott_analyzers import analyze_manifold
+    from codebase.topology_analyzers import analyze_circular
+
+    graph = build_shared_graph(scan_root)
+    manifold = analyze_manifold(graph)
+    basis = manifold.get("cycle_basis", [])
+    expect(len(basis) == 1, f"{name}: harus ada satu cycle-basis witness")
+    expect(
+        basis[0].get("orientation") == "directed",
+        f"{name}: a->b->c->a harus dikenali sebagai directed witness",
+    )
+    circular = analyze_circular(graph)
+    expect(
+        circular.get("summary", {}).get("total_cycles") == 1,
+        f"{name}: directed witness harus cocok dengan satu circular import",
+    )
 
 
 def test_f30_complexity_calibration():
@@ -1643,6 +1705,33 @@ def test_f30_complexity_calibration():
     expect(
         signature.startswith("sha256:"),
         f"{name}: signature_hash harus tetap ada"
+    )
+
+
+def test_f32_reciprocal_cycle_basis():
+    name = "F32"
+    scan_root = "fixtures_min/f32_reciprocal_cycle/project/src"
+    from core.shared_graph import build_shared_graph
+    from codebase.hott_analyzers import analyze_manifold
+    from codebase.topology_analyzers import analyze_circular
+
+    graph = build_shared_graph(scan_root)
+    manifold = analyze_manifold(graph)
+    betti = manifold.get("manifold", {}).get("betti_numbers", {})
+    basis = manifold.get("cycle_basis", [])
+
+    expect(betti.get("beta_0") == 1, f"{name}: dua file reciprocal harus terhubung")
+    expect(betti.get("beta_1") == 1, f"{name}: dua import reciprocal harus membentuk β₁=1")
+    expect(len(basis) == 1, f"{name}: reciprocal cycle harus punya satu witness")
+    expect(basis[0].get("length") == 2, f"{name}: witness harus berupa cycle dua edge")
+    expect(basis[0].get("orientation") == "directed", f"{name}: reciprocal cycle harus directed")
+    expect(
+        manifold.get("manifold", {}).get("cycle_basis_complete") is True,
+        f"{name}: cycle basis harus lengkap untuk multigraph",
+    )
+    expect(
+        analyze_circular(graph).get("summary", {}).get("total_cycles") == 1,
+        f"{name}: reciprocal import harus terdeteksi circular",
     )
 
 
@@ -1811,89 +1900,6 @@ def test_kernel_cli_contract():
     )
 
 
-def test_rest_api_kernel_wiring():
-    """Pastikan REST API hanya merutekan request ke canonical kernel."""
-    server_path = ROOT.parent.parent / "src" / "server.ts"
-    app_path = ROOT.parent.parent / "src" / "app" / "app.ts"
-    server_source = server_path.read_text(encoding="utf-8")
-    app_source = app_path.read_text(encoding="utf-8")
-
-    legacy_scripts = {
-        "file_scanner.py",
-        "async_waterfall_detector.py",
-        "deopt_checker.py",
-        "gc_pressure_analyzer.py",
-        "cache_auditor.py",
-        "type_isomorphism_observer.py",
-        "boundary_sheaf_checker.py",
-        "homotopy_path_observer.py",
-        "topological_integrity_orchestrator.py",
-        "topological_manifold_builder.py",
-        "invariant_encoder.py",
-        "decoder_steering.py",
-    }
-    for script_name in sorted(legacy_scripts):
-        expect(
-            script_name not in server_source,
-            f"REST: server masih merujuk legacy script {script_name}",
-        )
-
-    expect("hott_kernel.py" in server_source, "REST: canonical kernel harus digunakan")
-    expect("hott_kernel.py" in app_source, "REST: fallback UI harus menyebut canonical kernel")
-
-    routes = {
-        "/api/python-info",
-        "/api/topology",
-        "/api/impact",
-        "/api/outline",
-        "/api/brief",
-        "/api/async-detector",
-        "/api/deopt-checker",
-        "/api/gc-pressure",
-        "/api/cache-auditor",
-        "/api/type-isomorphism",
-        "/api/boundary-sheaf",
-        "/api/homotopy-paths",
-        "/api/topological-integrity",
-        "/api/topological-manifold",
-        "/api/topological-fingerprint",
-        "/api/decoder-steering",
-    }
-    for route in sorted(routes):
-        expect(route in server_source, f"REST: route hilang setelah migrasi: {route}")
-
-    analyzer_names = (
-        "perf.async",
-        "perf.deopt",
-        "perf.gc",
-        "perf.cache",
-        "hott.isomorphism",
-        "hott.sheaf",
-        "hott.homotopy",
-        "hott.manifold",
-    )
-    for analyzer_name in analyzer_names:
-        expect(
-            analyzer_name in server_source,
-            f"REST: mapping analyzer hilang: {analyzer_name}",
-        )
-
-    for analyzer_name in analyzer_names:
-        result = _run_kernel(
-            "analyze",
-            "fixtures_min/f16_file_brief/project",
-            "--analyzers",
-            analyzer_name,
-            "--output",
-            "findings",
-        )
-        analyzer_results = result.get("analyzers", {}).get("results", {})
-        expect(
-            analyzer_name in analyzer_results,
-            f"REST: command mapping kernel gagal untuk {analyzer_name}",
-        )
-
-
 def main():
     write_fixtures()
 
@@ -1926,9 +1932,9 @@ def main():
         test_f29_archetype_calibration,
         test_f30_complexity_calibration,
         test_f31_memory_topology_betti,
+        test_f32_reciprocal_cycle_basis,
         test_kernel_wiring_smoke,
         test_kernel_cli_contract,
-        test_rest_api_kernel_wiring,
     ]
 
     for test in tests:
@@ -1943,7 +1949,7 @@ def main():
             print(f"- {failure}")
         sys.exit(1)
 
-    print("PASS: 28 fixture minimal + 3 integration smoke aman")
+    print("PASS: 29 fixture minimal + 2 portable integration smoke aman")
 
 
 if __name__ == "__main__":

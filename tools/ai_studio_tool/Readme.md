@@ -5,7 +5,24 @@
 
 > **Schema Version:** 4.0.0-memory
 > **Entry Point:** `tools/ai_studio_tool/hott_kernel.py`
-> **Fixture Baseline:** 28 tests PASS
+> **Fixture Baseline:** 29 fixture minimal + 2 portable integration smoke PASS
+
+---
+
+## 0. BATAS PRODUK PORTABEL
+
+Folder `tools/ai_studio_tool/` adalah produk yang dibawa ke berbagai proyek.
+Folder Angular `src/`, REST server, dan UI pada repository ini hanya merupakan
+target/corpus pengujian. Arah dependensi harus selalu satu arah:
+
+```text
+Angular/REST demo -> hott_kernel.py
+hott_kernel.py -X-> Angular/REST demo
+```
+
+Menyalin folder `ai_studio_tool` saja harus cukup untuk menjalankan kernel dan
+seluruh fixture internal. Tool tidak memerlukan Node, Angular, atau struktur
+repository demo.
 
 ---
 
@@ -63,6 +80,20 @@ Topologi (khususnya Homotopy Type Theory / HoTT) dipilih sebagai bahasa karena:
 2. **Bisa diukur**: Betti numbers (β₀, β₁, β₂) memberikan metrik kuantitatif
 3. **Bisa dibandingkan**: Signature hash memungkinkan drift detection
 4. **Bisa memandu**: Archetype → reasoning strategy mapping
+
+Istilah HoTT di sini digunakan sebagai **konteks semantik untuk reasoning LLM**,
+bukan sebagai klaim bahwa output adalah pembuktian HoTT formal. Untuk analisis
+codebase, model Betti saat ini adalah `dependency_multigraph_1_complex`:
+
+- vertex = file sumber yang didukung
+- edge = relative import yang berhasil di-resolve
+- β₀ = komponen terhubung pada underlying undirected multigraph
+- β₁ = cycle rank pada underlying undirected multigraph
+- β₂ = 0 secara konstruksi karena model berdimensi satu
+
+Karena orientasi import diabaikan saat menghitung Betti, β₁ tidak identik dengan
+jumlah circular import. `cycle_basis` menyediakan saksi path dan label
+`directed`/`mixed` agar LLM dapat membedakan keduanya.
 
 ### 2.3 Ide: Memori sebagai Ruang Topologis
 
@@ -472,4 +503,3 @@ Tool ini dibangun berdasarkan konsep-konsep dari:
 5. **hott**: HITs untuk Memory Consolidation — Betti numbers sebagai metrik kesehatan memori
 
 ---
-

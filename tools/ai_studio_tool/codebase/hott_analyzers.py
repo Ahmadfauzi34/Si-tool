@@ -54,6 +54,116 @@ def _clamp01(x: float) -> float:
     return max(0.0, min(1.0, x))
 
 
+def _tree_path(
+    adjacency: Dict[str, Set[str]],
+    start: str,
+    target: str,
+) -> List[str]:
+    """Return the deterministic path between two nodes in a forest."""
+    parents: Dict[str, Optional[str]] = {start: None}
+    queue = [start]
+    cursor = 0
+
+    while cursor < len(queue):
+        node = queue[cursor]
+        cursor += 1
+        if node == target:
+            break
+        for neighbor in sorted(adjacency.get(node, set())):
+            if neighbor not in parents:
+                parents[neighbor] = node
+                queue.append(neighbor)
+
+    if target not in parents:
+        return []
+
+    path: List[str] = []
+    current: Optional[str] = target
+    while current is not None:
+        path.append(current)
+        current = parents[current]
+    path.reverse()
+    return path
+
+
+def _build_undirected_cycle_basis(
+    vertices: List[str],
+    edges: List[Tuple[str, str]],
+) -> List[Dict[str, Any]]:
+    """
+    Build deterministic fundamental-cycle witnesses for the undirected graph.
+
+    Betti-1 ignores import orientation. Each non-tree edge closes exactly one
+    basis cycle; orientation is then restored as evidence for interpretation.
+    """
+    if not vertices:
+        return []
+
+    union_find = _UnionFind(vertices)
+    tree: Dict[str, Set[str]] = {vertex: set() for vertex in vertices}
+    directed_edges = set(map(tuple, edges))
+    undirected_edges = sorted(
+        (min(source, target), max(source, target), source, target)
+        for source, target in directed_edges
+    )
+    basis: List[Dict[str, Any]] = []
+
+    for source, target, directed_source, directed_target in undirected_edges:
+        if source != target and union_find.union(source, target):
+            tree[source].add(target)
+            tree[target].add(source)
+            continue
+
+        if source == target:
+            closed_path = [source, source]
+        else:
+            path = _tree_path(tree, source, target)
+            if not path:
+                continue
+            closed_path = path + [source]
+
+        witness_edges: List[Dict[str, Any]] = []
+        forward_aligned = True
+        reverse_aligned = True
+        for left, right in zip(closed_path, closed_path[1:]):
+            observed_directions: List[List[str]] = []
+            if (left, right) in directed_edges:
+                observed_directions.append([left, right])
+            else:
+                forward_aligned = False
+            if (right, left) in directed_edges:
+                observed_directions.append([right, left])
+            else:
+                reverse_aligned = False
+            witness_edges.append({
+                "undirected_edge": [left, right],
+                "observed_directions": observed_directions,
+            })
+
+        orientation = (
+            "directed"
+            if forward_aligned or reverse_aligned
+            else "mixed"
+        )
+        interpretation = (
+            "directed_import_cycle_witness"
+            if orientation == "directed"
+            else "reconvergent_dependency_cycle_witness"
+        )
+        basis.append({
+            "basis_index": len(basis) + 1,
+            "vertices": closed_path[:-1],
+            "closed_path": closed_path,
+            "length": len(closed_path) - 1,
+            "closing_edge": [directed_source, directed_target],
+            "orientation": orientation,
+            "interpretation": interpretation,
+            "witness_edges": witness_edges,
+        })
+
+    return basis
+
+
 # ============================================================
 # hott.isomorphism — Type Isomorphism Observer
 # ============================================================
@@ -456,6 +566,7 @@ def analyze_manifold(shared_graph: Dict[str, Any]) -> Dict[str, Any]:
 
     n_vertices = len(vertices)
     n_edges = len(edges)
+    cycle_basis = _build_undirected_cycle_basis(vertices, edges)
 
     # --- β₀ via union-find ---
     if n_vertices == 0:
@@ -475,6 +586,21 @@ def analyze_manifold(shared_graph: Dict[str, Any]) -> Dict[str, Any]:
         beta_2 = 0
 
         average_degree = (2.0 * n_edges / n_vertices) if n_vertices > 0 else 0.0
+
+    cycle_orientation_counts = {
+        "directed": sum(1 for item in cycle_basis if item["orientation"] == "directed"),
+        "mixed": sum(1 for item in cycle_basis if item["orientation"] == "mixed"),
+    }
+    topological_model = {
+        "name": "dependency_multigraph_1_complex",
+        "vertices": "supported source files",
+        "edges": "resolved relative imports",
+        "edge_orientation_for_betti": "ignored",
+        "beta_0_interpretation": "connected components of the underlying undirected multigraph",
+        "beta_1_interpretation": "independent cycles of the underlying undirected multigraph",
+        "beta_2_interpretation": "zero by construction for this one-dimensional model",
+        "formal_scope": "graph invariant used as semantic context; not a formal HoTT proof",
+    }
 
     # --- Archetype classification (TERKALIBRASI) ---
     archetype, archetype_desc, archetype_conf = _classify_archetype(
@@ -513,8 +639,13 @@ def analyze_manifold(shared_graph: Dict[str, Any]) -> Dict[str, Any]:
             "type": "independent_cycles",
             "severity": "medium",
             "count": beta_1,
-            "observation": f"{beta_1} independent cycle(s) detected in dependency graph.",
+            "observation": (
+                f"{beta_1} independent undirected cycle(s) detected in the dependency graph. "
+                "This does not by itself imply circular imports."
+            ),
             "invariant": "beta_1",
+            "cycle_basis": cycle_basis,
+            "orientation_counts": cycle_orientation_counts,
         })
 
     if beta_0 > 1:
@@ -539,6 +670,8 @@ def analyze_manifold(shared_graph: Dict[str, Any]) -> Dict[str, Any]:
         "analyzer": "hott.manifold",
         "findings": findings,
         "invariant_vector": invariant_vector,
+        "topological_model": topological_model,
+        "cycle_basis": cycle_basis,
         "manifold": {
             "vertex_count": n_vertices,
             "edge_count": n_edges,
@@ -547,6 +680,10 @@ def analyze_manifold(shared_graph: Dict[str, Any]) -> Dict[str, Any]:
                 "beta_1": beta_1,
                 "beta_2": beta_2,
             },
+            "cycle_basis": cycle_basis,
+            "cycle_basis_complete": len(cycle_basis) == beta_1,
+            "cycle_orientation_counts": cycle_orientation_counts,
+            "topological_model": topological_model,
             "average_degree": round(average_degree, 4),
             "invariant_vector": invariant_vector,
             "complexity_score": complexity,
@@ -557,6 +694,9 @@ def analyze_manifold(shared_graph: Dict[str, Any]) -> Dict[str, Any]:
         "summary": {
             "connected_components": beta_0,
             "independent_cycles": beta_1,
+            "undirected_cycle_rank": beta_1,
+            "cycle_basis_witnesses": len(cycle_basis),
+            "cycle_orientation_counts": cycle_orientation_counts,
             "enclosed_voids": beta_2,
             "complexity_score": complexity,
             "structural_archetype": archetype,

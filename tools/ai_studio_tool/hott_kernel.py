@@ -1563,6 +1563,8 @@ def kernel_steer(
             "baseline": result.get("baseline"),
             "summary": result.get("summary"),
             "steering_signals": result.get("steering_signals"),
+            "cycle_semantics": result.get("cycle_semantics"),
+            "steering_prompt_block": result.get("steering_prompt_block"),
         }
 
     return {
