@@ -99,13 +99,16 @@ def encode_topological_invariants(
     """Mengencode topological fingerprint dari codebase."""
     try:
         from codebase.hott_analyzers import analyze_manifold
+        from codebase.topology_analyzers import analyze_test_reachability
         from core.shared_graph import build_shared_graph
     except ImportError:
         from hott_analyzers import analyze_manifold
+        from topology_analyzers import analyze_test_reachability
         from shared_graph import build_shared_graph
 
     graph = build_shared_graph(scan_root, ignore_dirs=ignore_dirs)
     manifold_result = analyze_manifold(graph)
+    test_reachability_result = analyze_test_reachability(graph)
     manifold = manifold_result.get("manifold", {})
     betti = manifold.get("betti_numbers", {})
     summary = manifold_result.get("summary", {})
@@ -131,6 +134,21 @@ def encode_topological_invariants(
             }
             for item in cycle_basis
         ],
+    }
+    test_summary = test_reachability_result.get("summary", {})
+    test_topology = {
+        "model": test_reachability_result.get("model", {}),
+        "summary": test_summary,
+        "high_influence_gaps": [
+            {
+                "file": item.get("file"),
+                "fan_in": item.get("fan_in", 0),
+                "reasons": item.get("reasons", []),
+            }
+            for item in test_reachability_result.get("findings", [])
+            if item.get("type") == "high_influence_without_test_path"
+        ],
+        "testless_components": test_reachability_result.get("testless_components", []),
     }
 
     total_nodes = graph["summary"]["total_files"]
@@ -189,6 +207,15 @@ def encode_topological_invariants(
         context_block += (
             f"- ... {len(cycle_semantics['witnesses']) - 5} additional basis witness(es) omitted\n"
         )
+    context_block += (
+        f"Test Topology: model=static_test_import_reachability, "
+        f"reachable={test_summary.get('statically_reachable_files', 0)}/"
+        f"{test_summary.get('total_production_files', 0)}, "
+        f"ratio={test_summary.get('static_test_reachability_ratio', 0.0)}, "
+        f"testless_components={test_summary.get('testless_component_count', 0)}, "
+        f"high_influence_gaps={test_summary.get('high_influence_without_test_path', 0)}\n"
+        "Test Interpretation: static import reachability is structural evidence, not runtime coverage.\n"
+    )
 
     return {
         "available": True,
@@ -200,6 +227,9 @@ def encode_topological_invariants(
             "structural_archetype": archetype,
             "topological_model": cycle_semantics["model"],
             "cycle_orientation_counts": cycle_orientation_counts,
+            "static_test_reachability_ratio": test_summary.get(
+                "static_test_reachability_ratio", 0.0
+            ),
         },
         "summary": {
             "betti_numbers": betti,
@@ -210,6 +240,7 @@ def encode_topological_invariants(
             **summary,
         },
         "cycle_semantics": cycle_semantics,
+        "test_topology": test_topology,
         "context_block": context_block,
     }
 
@@ -296,6 +327,8 @@ def steer_decoder(
     budget = "low" if complexity < 0.3 else ("medium" if complexity < 0.7 else "high")
     regrounding = dist > 0.25
     cycle_semantics = current.get("cycle_semantics", {})
+    test_topology = current.get("test_topology", {})
+    test_summary = test_topology.get("summary", {})
 
     prompt_block = (
         f"[TOPOLOGICAL STEERING SIGNAL]\n"
@@ -307,6 +340,11 @@ def steer_decoder(
         f"Cycle Basis: directed={cycle_semantics.get('directed_basis_witnesses', 0)}, "
         f"mixed={cycle_semantics.get('mixed_basis_witnesses', 0)}\n"
         f"Cycle Interpretation: {cycle_semantics.get('interpretation', '')}\n"
+        f"Test Topology: reachable={test_summary.get('statically_reachable_files', 0)}/"
+        f"{test_summary.get('total_production_files', 0)}, "
+        f"testless_components={test_summary.get('testless_component_count', 0)}, "
+        f"high_influence_gaps={test_summary.get('high_influence_without_test_path', 0)}\n"
+        "Test Interpretation: static import reachability, not runtime coverage.\n"
     )
 
     return {
@@ -330,6 +368,7 @@ def steer_decoder(
         },
         "summary": current.get("summary"),
         "cycle_semantics": cycle_semantics,
+        "test_topology": test_topology,
         "steering_prompt_block": prompt_block,
         "current_fingerprint": curr_fp,
         "baseline_fingerprint": base_fp if has_baseline else None,

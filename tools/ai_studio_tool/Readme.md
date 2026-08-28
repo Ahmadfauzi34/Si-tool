@@ -5,7 +5,7 @@
 
 > **Schema Version:** 4.0.0-memory
 > **Entry Point:** `tools/ai_studio_tool/hott_kernel.py`
-> **Fixture Baseline:** 29 fixture minimal + 2 portable integration smoke PASS
+> **Fixture Baseline:** 30 fixture minimal + 2 portable integration smoke PASS
 
 ---
 
@@ -94,6 +94,12 @@ codebase, model Betti saat ini adalah `dependency_multigraph_1_complex`:
 Karena orientasi import diabaikan saat menghitung Betti, β₁ tidak identik dengan
 jumlah circular import. `cycle_basis` menyediakan saksi path dan label
 `directed`/`mixed` agar LLM dapat membedakan keduanya.
+
+Test topology memakai model terpisah bernama
+`static_test_import_reachability`. Model ini mengikuti relative import dari
+file `.spec/.test` menuju source dependency dan menghasilkan witness path.
+Nilainya adalah bukti struktural untuk context selection LLM, **bukan** runtime
+statement/branch coverage.
 
 ### 2.3 Ide: Memori sebagai Ruang Topologis
 
@@ -201,7 +207,7 @@ Tool ini dibangun di atas 5 pilar teoretis dari Homotopy Type Theory (HoTT):
 │  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐    │
 │  │ CODEBASE KERNEL │  │  MEMORY DOMAIN  │  │ FIBRATION LAYER │    │
 │  │                 │  │                 │  │                 │    │
-│  │ 12 Analyzers    │  │ Store/Recall    │  │ Fiber Init      │    │
+│  │ 13 Analyzers    │  │ Store/Recall    │  │ Fiber Init      │    │
 │  │ Synthesis       │  │ Consolidate     │  │ Lift/Descend    │    │
 │  │ Steering        │  │ Compact/Bridge  │  │ Section         │    │
 │  │ Impact/Outline  │  │ Betti Breakdown │  │ Switch          │    │
@@ -217,11 +223,11 @@ Tool ini dibangun di atas 5 pilar teoretis dari Homotopy Type Theory (HoTT):
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-### 4.2 Codebase Kernel (12 Analyzers)
+### 4.2 Codebase Kernel (13 Analyzers)
 
 | Prefix | Analyzers | Fungsi |
 |---|---|---|
-| `topo.*` | orphan, entrypoint, circular, risk | Struktur & risiko topologis |
+| `topo.*` | orphan, entrypoint, circular, risk, test_reachability | Struktur, risiko, dan static test topology |
 | `perf.*` | async, deopt, gc, cache | Performance anti-patterns |
 | `hott.*` | isomorphism, sheaf, homotopy, manifold | Topological invariants |
 
@@ -293,7 +299,7 @@ Tidak semua komponen perlu dihubungkan. β₀ tinggi bisa valid jika memang doma
 ### 6.1 Quick Start
 
 ```bash
-# Analisis codebase (semua 12 analyzer)
+# Analisis codebase (semua 13 analyzer)
 python3 tools/ai_studio_tool/hott_kernel.py analyze src --output summary
 
 # Steering (codebase + memory unified)
@@ -480,7 +486,7 @@ Tidak semua hal perlu terhubung. β₀ tinggi bisa valid jika memang domain berb
 | Metrik | Nilai |
 |---|---|
 | Total CLI modes | 30+ |
-| Total analyzers | 17 (12 codebase + 5 memory) |
+| Total analyzers | 18 (13 codebase + 5 memory) |
 | Targeted queries | 3 (impact, outline, brief) |
 | Cross-domain modes | 3 (xanalyze, xsteer, xcontext) |
 | Memory operations | 12 |

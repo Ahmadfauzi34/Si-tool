@@ -14,6 +14,7 @@ try:
     from codebase.topology_analyzers import (
         analyze_circular,
         analyze_risk,
+        analyze_test_reachability,
     )
     TOPO_ANALYZERS_AVAILABLE = True
 except ImportError:
@@ -21,6 +22,7 @@ except ImportError:
         from topology_analyzers import (
             analyze_circular,
             analyze_risk,
+            analyze_test_reachability,
         )
         TOPO_ANALYZERS_AVAILABLE = True
     except ImportError:
@@ -143,13 +145,19 @@ def analyze_entrypoint_impact(shared_graph: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-# Register all 12 analyzers
+# Register all 13 analyzers
 register_analyzer("topo.orphan", analyze_orphan, "Deteksi unreferenced/orphan source files", "topology")
 register_analyzer("topo.entrypoint", analyze_entrypoint_impact, "Deteksi entry points dan transitively reachable files", "topology")
 
 if TOPO_ANALYZERS_AVAILABLE:
     register_analyzer("topo.circular", analyze_circular, "Deteksi circular import dependencies (cycle basis)", "topology")
     register_analyzer("topo.risk", analyze_risk, "Evaluasi change risk per file (fan-in, boundary, entrypoint)", "topology")
+    register_analyzer(
+        "topo.test_reachability",
+        analyze_test_reachability,
+        "Petakan static import reachability dari test ke source (bukan runtime coverage)",
+        "topology",
+    )
 
 if PERF_ANALYZERS_AVAILABLE:
     register_analyzer("perf.async", analyze_async_waterfall, "Deteksi sequential await di loop dan waterfall async", "performance")

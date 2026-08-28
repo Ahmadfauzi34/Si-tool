@@ -230,6 +230,205 @@ def analyze_risk(shared_graph: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # ============================================================
+# topo.test_reachability — Static Test Import Topology
+# ============================================================
+
+def _reconstruct_path(parents: Dict[str, Optional[str]], target: str) -> List[str]:
+    path: List[str] = []
+    current: Optional[str] = target
+    while current is not None:
+        path.append(current)
+        current = parents.get(current)
+    path.reverse()
+    return path
+
+
+def analyze_test_reachability(shared_graph: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Map static import reachability from test files into production files.
+
+    This is intentionally not called runtime coverage: a resolved import path is
+    evidence that a test can reach a source file statically, not that statements
+    or branches execute at runtime.
+    """
+    vertices = sorted(shared_graph.get("vertices", []))
+    edges = list(map(tuple, shared_graph.get("edges", [])))
+    metadata = shared_graph.get("node_metadata", {})
+    tests = sorted(vertex for vertex in vertices if metadata.get(vertex, {}).get("is_test"))
+    production = sorted(set(vertices) - set(tests))
+    production_set = set(production)
+
+    forward: Dict[str, Set[str]] = {vertex: set() for vertex in vertices}
+    undirected: Dict[str, Set[str]] = {vertex: set() for vertex in vertices}
+    for source, target in edges:
+        forward.setdefault(source, set()).add(target)
+        undirected.setdefault(source, set()).add(target)
+        undirected.setdefault(target, set()).add(source)
+
+    coverage_by_test: Dict[str, Dict[str, Any]] = {}
+    source_test_witnesses: Dict[str, List[Dict[str, Any]]] = {}
+    reachable_sources: Set[str] = set()
+    directly_tested_sources: Set[str] = set()
+    findings: List[Dict[str, Any]] = []
+
+    for test_file in tests:
+        parents: Dict[str, Optional[str]] = {test_file: None}
+        queue = [test_file]
+        cursor = 0
+        while cursor < len(queue):
+            node = queue[cursor]
+            cursor += 1
+            for neighbor in sorted(forward.get(node, set())):
+                if neighbor not in parents:
+                    parents[neighbor] = node
+                    queue.append(neighbor)
+
+        direct_targets = sorted(forward.get(test_file, set()) & production_set)
+        reachable = sorted(set(parents) & production_set)
+        directly_tested_sources.update(direct_targets)
+        reachable_sources.update(reachable)
+        coverage_by_test[test_file] = {
+            "direct_targets": direct_targets,
+            "reachable_sources": reachable,
+            "reachable_count": len(reachable),
+        }
+
+        for source_file in reachable:
+            source_test_witnesses.setdefault(source_file, []).append({
+                "test": test_file,
+                "path": _reconstruct_path(parents, source_file),
+            })
+
+        if not reachable:
+            findings.append({
+                "type": "isolated_test",
+                "severity": "medium",
+                "file": test_file,
+                "observation": (
+                    f"Test '{test_file}' has no direct or transitive resolved "
+                    "relative import path to a production source file."
+                ),
+                "model": "static_test_import_reachability",
+            })
+
+    unreachable_sources = sorted(production_set - reachable_sources)
+
+    for source_file in unreachable_sources:
+        meta = metadata.get(source_file, {})
+        if meta.get("is_entrypoint") or meta.get("fan_in", 0) >= 2:
+            reasons = []
+            if meta.get("is_entrypoint"):
+                reasons.append("is_entrypoint")
+            if meta.get("fan_in", 0) >= 2:
+                reasons.append("high_fan_in")
+            findings.append({
+                "type": "high_influence_without_test_path",
+                "severity": "medium",
+                "file": source_file,
+                "fan_in": meta.get("fan_in", 0),
+                "reasons": reasons,
+                "observation": (
+                    f"Influential source '{source_file}' has no static import path "
+                    f"from a test ({', '.join(reasons)})."
+                ),
+                "model": "static_test_import_reachability",
+            })
+
+    # Connected components are computed on the undirected graph only to group
+    # islands. Reachability above remains directional.
+    seen: Set[str] = set()
+    components: List[List[str]] = []
+    for vertex in vertices:
+        if vertex in seen:
+            continue
+        stack = [vertex]
+        seen.add(vertex)
+        component: List[str] = []
+        while stack:
+            node = stack.pop()
+            component.append(node)
+            for neighbor in sorted(undirected.get(node, set()), reverse=True):
+                if neighbor not in seen:
+                    seen.add(neighbor)
+                    stack.append(neighbor)
+        components.append(sorted(component))
+
+    testless_components: List[Dict[str, Any]] = []
+    for component in sorted(components, key=lambda item: item[0] if item else ""):
+        component_tests = sorted(set(component) & set(tests))
+        component_sources = sorted(set(component) & production_set)
+        if component_sources and not component_tests:
+            component_data = {
+                "component_id": f"testless_{len(testless_components) + 1}",
+                "source_files": component_sources,
+                "source_count": len(component_sources),
+            }
+            testless_components.append(component_data)
+            findings.append({
+                "type": "testless_component",
+                "severity": "low",
+                **component_data,
+                "observation": (
+                    f"Undirected source component with {len(component_sources)} file(s) "
+                    "contains no test file."
+                ),
+                "model": "static_test_import_reachability",
+            })
+
+    if not tests and production:
+        findings.append({
+            "type": "no_test_files",
+            "severity": "high",
+            "source_count": len(production),
+            "observation": "No supported .spec/.test source files were found.",
+            "model": "static_test_import_reachability",
+        })
+
+    severity_order = {"high": 0, "medium": 1, "low": 2, "info": 3}
+    findings.sort(key=lambda item: (
+        severity_order.get(item.get("severity", "info"), 4),
+        item.get("type", ""),
+        item.get("file", item.get("component_id", "")),
+    ))
+
+    ratio = round(len(reachable_sources) / len(production), 4) if production else 1.0
+    return {
+        "analyzer": "topo.test_reachability",
+        "model": {
+            "name": "static_test_import_reachability",
+            "edge_semantics": "resolved relative import",
+            "direction": "test or source file to imported dependency",
+            "not_runtime_coverage": True,
+            "interpretation": (
+                "Reachability is structural evidence for LLM context and must not "
+                "be reported as executed statements or branch coverage."
+            ),
+        },
+        "findings": findings,
+        "coverage_by_test": coverage_by_test,
+        "source_test_witnesses": source_test_witnesses,
+        "unreachable_sources": unreachable_sources,
+        "testless_components": testless_components,
+        "summary": {
+            "total_tests": len(tests),
+            "total_production_files": len(production),
+            "directly_tested_files": len(directly_tested_sources),
+            "statically_reachable_files": len(reachable_sources),
+            "statically_unreachable_files": len(unreachable_sources),
+            "static_test_reachability_ratio": ratio,
+            "testless_component_count": len(testless_components),
+            "high_influence_without_test_path": sum(
+                1 for item in findings
+                if item.get("type") == "high_influence_without_test_path"
+            ),
+            "isolated_test_count": sum(
+                1 for item in findings if item.get("type") == "isolated_test"
+            ),
+        },
+    }
+
+
+# ============================================================
 # TARGETED QUERY: Impact Analysis
 # ============================================================
 

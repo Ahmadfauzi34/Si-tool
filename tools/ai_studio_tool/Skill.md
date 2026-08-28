@@ -5,7 +5,7 @@
 name: ai-studio-hott-kernel
 description: |
   HoTT Kernel 4.0 — Unified Codebase Intelligence + Memory Domain + Fibration
-  Context Management. Single entry point (hott_kernel.py) untuk 12 codebase
+  Context Management. Single entry point (hott_kernel.py) untuk 13 codebase
   analyzers, memory topology operations, fiber-based context management,
   dan cross-domain steering. Gunakan untuk SEMUA analisis codebase dan
   manajemen memori agent.
@@ -225,6 +225,16 @@ diabaikan untuk β₀/β₁, sehingga β₁ **bukan** jumlah circular import.
 | `cycle_basis[].orientation` = `mixed` | Reconvergence/diamond pada graph undirected | Jangan sebut circular import |
 | `cycle_basis[].closed_path` | Saksi file/edge untuk β₁ | Gunakan sebagai semantic context LLM |
 | `cycle_basis_complete` = `true` | Jumlah witness sama dengan β₁ | Evidence lengkap untuk basis yang dipilih |
+
+### 4.2B Reading `topo.test_reachability`
+
+| Field | Interpretasi | Action |
+|---|---|---|
+| `model.not_runtime_coverage` = `true` | Hanya static import topology | Jangan klaim statement/branch coverage |
+| `source_test_witnesses` | Path test → source dependency | Pakai untuk memilih test context |
+| `testless_components` | Source island tanpa test file | Prioritaskan component-level test |
+| `high_influence_without_test_path` | File berpengaruh tanpa test witness | Naikkan kehati-hatian sebelum edit |
+| `static_test_reachability_ratio` | Rasio source yang reachable secara statis | Gunakan sebagai sinyal, bukan coverage score |
 
 ### 4.3 Reading `memory analyze` Output
 

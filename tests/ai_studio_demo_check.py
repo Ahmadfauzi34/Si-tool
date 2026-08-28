@@ -140,7 +140,7 @@ def test_angular_cycle_semantics():
     betti = manifold.get("manifold", {}).get("betti_numbers", {})
     basis = manifold.get("cycle_basis", [])
 
-    expect(betti.get("beta_0") == 9, "DEMO: beta_0 harus 9 setelah cycle lab ditambahkan")
+    expect(betti.get("beta_0") == 11, "DEMO: beta_0 harus 11 setelah topology labs ditambahkan")
     expect(betti.get("beta_1") == 3, "DEMO: beta_1 harus 3 setelah cycle lab ditambahkan")
     expect(len(basis) == betti.get("beta_1"), "DEMO: setiap basis cycle harus punya witness")
 
@@ -203,11 +203,78 @@ def test_angular_cycle_semantics():
     )
 
 
+def test_angular_test_reachability():
+    """Static test paths are evidence for context selection, not coverage."""
+    payload = run_kernel(
+        "analyze",
+        "src",
+        "--analyzers",
+        "topo.test_reachability",
+        "--output",
+        "findings",
+    )
+    result = payload.get("analyzers", {}).get("results", {}).get(
+        "topo.test_reachability", {}
+    )
+    summary = result.get("summary", {})
+    expect(summary.get("total_tests") == 2, "DEMO: harus ada dua test file")
+    expect(summary.get("total_production_files") == 25, "DEMO: harus ada 25 production source")
+    expect(summary.get("directly_tested_files") == 2, "DEMO: dua source harus direct test target")
+    expect(summary.get("statically_reachable_files") == 3, "DEMO: tiga source harus reachable")
+    expect(summary.get("static_test_reachability_ratio") == 0.12, "DEMO: ratio harus 0.12")
+    expect(summary.get("testless_component_count") == 9, "DEMO: harus ada sembilan testless component")
+    expect(summary.get("high_influence_without_test_path") == 6, "DEMO: harus ada enam influence gap")
+
+    covered_service = "src/topology-lab/test-reachability/covered.service.ts"
+    covered_test = "src/topology-lab/test-reachability/covered.consumer.spec.ts"
+    witness = result.get("source_test_witnesses", {}).get(covered_service, [])
+    expect(len(witness) == 1, "DEMO: covered service harus punya satu test witness")
+    expect(
+        witness[0].get("path") == [
+            covered_test,
+            "src/topology-lab/test-reachability/covered.consumer.ts",
+            covered_service,
+        ],
+        "DEMO: covered service harus punya directional witness path",
+    )
+
+    critical_service = "src/topology-lab/test-reachability/critical.service.ts"
+    expect(
+        critical_service in result.get("unreachable_sources", []),
+        "DEMO: critical service harus tidak terjangkau secara statis",
+    )
+    high_influence_files = {
+        item.get("file")
+        for item in result.get("findings", [])
+        if item.get("type") == "high_influence_without_test_path"
+    }
+    expect(
+        critical_service in high_influence_files,
+        "DEMO: critical service harus menjadi high-influence gap",
+    )
+    expect(
+        result.get("model", {}).get("not_runtime_coverage") is True,
+        "DEMO: analyzer harus menolak klaim runtime coverage",
+    )
+
+    steering = run_kernel("steer", "src", "--output", "summary")
+    test_topology = steering.get("test_topology", {})
+    expect(
+        test_topology.get("summary", {}).get("statically_reachable_files") == 3,
+        "DEMO: steering harus membawa test topology summary",
+    )
+    expect(
+        "not runtime coverage" in steering.get("steering_prompt_block", ""),
+        "DEMO: steering prompt harus menjaga batas interpretasi coverage",
+    )
+
+
 def main():
     for test in (
         test_portable_tool_bundle,
         test_rest_kernel_wiring,
         test_angular_cycle_semantics,
+        test_angular_test_reachability,
     ):
         try:
             test()
