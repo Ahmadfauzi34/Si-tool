@@ -377,12 +377,12 @@ def kernel_memory_steer(output_mode: str = "full") -> Dict[str, Any]:
     memory_graph = build_memory_graph()
 
     # Run manifold analyzer untuk Betti numbers
-    from memory_analyzers import analyze_manifold
+    from memory.analyzers import analyze_manifold
     manifold_result = analyze_manifold(memory_graph)
     manifold_data = manifold_result.get("manifold", {})
 
     # Compute health score
-    from memory_analyzers import run_memory_analyzers
+    from memory.analyzers import run_memory_analyzers
     analyzer_output = run_memory_analyzers(memory_graph)
     severity_counts = {"high": 0, "medium": 0, "low": 0}
     for r in analyzer_output.get("results", {}).values():
@@ -447,7 +447,7 @@ def kernel_memory_establish() -> Dict[str, Any]:
 
     # Build graph & compute fingerprint
     memory_graph = build_memory_graph()
-    from memory_analyzers import analyze_manifold, run_memory_analyzers
+    from memory.analyzers import analyze_manifold, run_memory_analyzers
     manifold_result = analyze_manifold(memory_graph)
     manifold_data = manifold_result.get("manifold", {})
 
@@ -489,7 +489,7 @@ def kernel_memory_drift() -> Dict[str, Any]:
 
     # Build graph & compute fingerprint
     memory_graph = build_memory_graph()
-    from memory_analyzers import analyze_manifold
+    from memory.analyzers import analyze_manifold
     manifold_result = analyze_manifold(memory_graph)
     manifold_data = manifold_result.get("manifold", {})
 
@@ -516,7 +516,7 @@ def kernel_memory_consolidate_by_tag(
     if not MEMORY_AVAILABLE:
         return {"error": "memory modules not available"}
     try:
-        from memory_store import consolidate_by_tag
+        from memory.store import consolidate_by_tag
         result = consolidate_by_tag(tag=tag, content=content, importance=importance)
         return {
             "schema_version": "4.0.0-memory",
@@ -535,7 +535,7 @@ def kernel_memory_consolidate_auto(
     if not MEMORY_AVAILABLE:
         return {"error": "memory modules not available"}
     try:
-        from memory_store import consolidate_by_tag_auto
+        from memory.store import consolidate_by_tag_auto
         result = consolidate_by_tag_auto(
             min_group_size=min_group_size,
             importance=importance,
@@ -554,7 +554,7 @@ def kernel_memory_unconsolidated_tags() -> Dict[str, Any]:
     if not MEMORY_AVAILABLE:
         return {"error": "memory modules not available"}
     try:
-        from memory_store import get_unconsolidated_by_tag
+        from memory.store import get_unconsolidated_by_tag
         result = get_unconsolidated_by_tag()
         return {
             "schema_version": "4.0.0-memory",
@@ -570,8 +570,8 @@ def kernel_memory_betti_breakdown() -> Dict[str, Any]:
     if not MEMORY_AVAILABLE:
         return {"error": "memory modules not available"}
     try:
-        from memory_graph import build_memory_graph
-        from memory_analyzers import analyze_betti_breakdown
+        from memory.graph import build_memory_graph
+        from memory.analyzers import analyze_betti_breakdown
         memory_graph = build_memory_graph()
         result = analyze_betti_breakdown(memory_graph)
         return {
@@ -597,12 +597,12 @@ def kernel_memory_compact(
         return {"error": "memory modules not available"}
 
     try:
-        from memory_store import (
+        from memory.store import (
             compact_memories, get_archive_stats,
             restore_memory, restore_all_archived,
         )
-        from memory_graph import build_memory_graph
-        from memory_analyzers import analyze_manifold
+        from memory.graph import build_memory_graph
+        from memory.analyzers import analyze_manifold
     except ImportError as exc:
         return {"error": f"import failed: {exc}"}
 
@@ -700,7 +700,7 @@ def kernel_memory_bridge(
     if not MEMORY_AVAILABLE:
         return {"error": "memory modules not available"}
     try:
-        from memory_store import bridge_memories
+        from memory.store import bridge_memories
         result = bridge_memories(
             from_id=from_id,
             to_id=to_id,
@@ -727,7 +727,7 @@ def kernel_memory_bridge_auto(
     if not MEMORY_AVAILABLE:
         return {"error": "memory modules not available"}
     try:
-        from memory_store import bridge_auto
+        from memory.store import bridge_auto
         result = bridge_auto(
             min_shared_tags=min_shared_tags,
             assoc_type=assoc_type,
@@ -750,7 +750,7 @@ def kernel_memory_bridge_candidates(
     if not MEMORY_AVAILABLE:
         return {"error": "memory modules not available"}
     try:
-        from memory_store import get_bridge_candidates
+        from memory.store import get_bridge_candidates
         result = get_bridge_candidates(min_shared_tags=min_shared_tags)
         return {
             "schema_version": "4.0.0-memory",
@@ -1019,7 +1019,6 @@ def kernel_fiber_transport(
         return {"error": "memory_fibration not available"}
     
     try:
-        from memory_fibration import transport_from_archive
         result = transport_from_archive(
             source_fiber_id=source_fiber_id,
             new_task=new_task,
@@ -1039,7 +1038,6 @@ def kernel_fiber_list_archives() -> Dict[str, Any]:
         return {"error": "memory_fibration not available"}
     
     try:
-        from memory_fibration import list_archived_fibers
         result = list_archived_fibers()
         return {"schema_version": "4.0.0-memory", "mode": "fiber_list_archives", **result}
     except Exception as exc:

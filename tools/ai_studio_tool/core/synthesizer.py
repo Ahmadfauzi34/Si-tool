@@ -174,10 +174,11 @@ def encode_topological_invariants(
 
 def establish_baseline(
     scan_root: str,
-    baseline_path: str = DEFAULT_BASELINE_PATH,
+    baseline_path: Optional[str] = None,
     ignore_dirs: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Establish and save codebase topological baseline."""
+    baseline_path = baseline_path or DEFAULT_BASELINE_PATH
     _ensure_baseline_dir(baseline_path)
     encoded = encode_topological_invariants(scan_root, ignore_dirs=ignore_dirs)
     data = {
@@ -196,8 +197,9 @@ def establish_baseline(
     }
 
 
-def load_baseline(baseline_path: str = DEFAULT_BASELINE_PATH) -> Optional[Dict[str, Any]]:
+def load_baseline(baseline_path: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """Load baseline if exists, fallback to legacy location."""
+    baseline_path = baseline_path or DEFAULT_BASELINE_PATH
     if os.path.exists(baseline_path):
         try:
             with open(baseline_path, "r", encoding="utf-8") as f:
@@ -217,10 +219,11 @@ def load_baseline(baseline_path: str = DEFAULT_BASELINE_PATH) -> Optional[Dict[s
 
 def steer_decoder(
     scan_root: str,
-    baseline_path: str = DEFAULT_BASELINE_PATH,
+    baseline_path: Optional[str] = None,
     ignore_dirs: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Generate decoder steering signals for codebase."""
+    baseline_path = baseline_path or DEFAULT_BASELINE_PATH
     current = encode_topological_invariants(scan_root, ignore_dirs=ignore_dirs)
     curr_fp = current.get("topological_fingerprint", {})
     base = load_baseline(baseline_path)

@@ -101,7 +101,7 @@ def cross_domain_steer(scan_root: str = "src") -> Dict[str, Any]:
     mem_signals = generate_memory_steering_signals(mem_fingerprint, mem_drift, mem_health)
 
     result["memory_steering"] = {
-        "archetype": mem_fingerprint.get("structural_archetype", "unknown"),
+        "archetype": mem_fingerprint.get("memory_archetype", "unknown"),
         "health_score": mem_health,
         "strategy": mem_signals.get("reasoning_strategy", "unknown"),
         "budget": mem_signals.get("reasoning_budget", "medium"),
