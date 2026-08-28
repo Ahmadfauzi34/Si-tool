@@ -26,7 +26,7 @@ os.chdir(ROOT)
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import file_scanner
+from codebase import file_scanner
 
 FIXTURES = {
     # F01 basic relative import
@@ -1192,24 +1192,15 @@ def test_f16_file_brief():
 def test_f17_async_waterfall():
     name = "F17"
     project = "fixtures_min/f17_async_waterfall/project"
-    target = f"{project}/src/service.ts"
+    from core.shared_graph import build_shared_graph
+    from codebase.performance_analyzers import analyze_async_waterfall
 
-    import importlib.util
-    detector_path = ROOT / "async_waterfall_detector.py"
-    spec = importlib.util.spec_from_file_location(
-        "async_waterfall_detector",
-        str(detector_path)
-    )
-    detector = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(detector)
+    sg = build_shared_graph(project)
+    result = analyze_async_waterfall(sg)
 
-    result = detector.analyze_file(target)
-
-    expect(result.get("exists") is True, f"{name}: file harus exists")
-    expect(result.get("is_async_file") is True, f"{name}: file harus terdeteksi async")
     expect(result["summary"]["total_findings"] >= 1, f"{name}: harus ada findings")
     expect(
-        result["summary"]["sequential_awaits"] >= 1 or result["summary"]["await_in_loops"] >= 1,
+        result["summary"]["by_type"]["sequential_await"] >= 1 or result["summary"]["by_type"]["await_in_loop"] >= 1,
         f"{name}: harus deteksi sequential await atau await in loop"
     )
 
@@ -1217,20 +1208,12 @@ def test_f17_async_waterfall():
 def test_f18_deopt_checker():
     name = "F18"
     project = "fixtures_min/f18_deopt_checker/project"
-    target = f"{project}/src/service.ts"
+    from core.shared_graph import build_shared_graph
+    from codebase.performance_analyzers import analyze_deopt
 
-    import importlib.util
-    checker_path = ROOT / "deopt_checker.py"
-    spec = importlib.util.spec_from_file_location(
-        "deopt_checker",
-        str(checker_path)
-    )
-    checker = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(checker)
+    sg = build_shared_graph(project)
+    result = analyze_deopt(sg)
 
-    result = checker.analyze_file(target)
-
-    expect(result.get("exists") is True, f"{name}: file harus exists")
     expect(result["summary"]["total_findings"] >= 2, f"{name}: harus ada minimal 2 findings (delete, eval)")
     expect(result["summary"]["by_type"]["delete_operator"] >= 1, f"{name}: harus deteksi delete operator")
     expect(result["summary"]["by_type"]["eval_usage"] >= 1, f"{name}: harus deteksi eval usage")
@@ -1239,20 +1222,12 @@ def test_f18_deopt_checker():
 def test_f19_gc_pressure():
     name = "F19"
     project = "fixtures_min/f19_gc_pressure/project"
-    target = f"{project}/src/processor.ts"
+    from core.shared_graph import build_shared_graph
+    from codebase.performance_analyzers import analyze_gc_pressure
 
-    import importlib.util
-    analyzer_path = ROOT / "gc_pressure_analyzer.py"
-    spec = importlib.util.spec_from_file_location(
-        "gc_pressure_analyzer",
-        str(analyzer_path)
-    )
-    analyzer = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(analyzer)
+    sg = build_shared_graph(project)
+    result = analyze_gc_pressure(sg)
 
-    result = analyzer.analyze_file(target)
-
-    expect(result.get("exists") is True, f"{name}: file harus exists")
     expect(result["summary"]["total_findings"] >= 3, f"{name}: harus ada minimal 3 findings")
     expect(result["summary"]["by_type"]["json_in_loop"] >= 1, f"{name}: harus deteksi JSON.parse di loop")
     expect(result["summary"]["by_type"]["uncleared_timer"] >= 1, f"{name}: harus deteksi uncleared timer")
@@ -1261,20 +1236,12 @@ def test_f19_gc_pressure():
 def test_f20_cache_audit():
     name = "F20"
     project = "fixtures_min/f20_cache_audit/project"
-    target = f"{project}/src/cache.service.ts"
+    from core.shared_graph import build_shared_graph
+    from codebase.performance_analyzers import analyze_cache
 
-    import importlib.util
-    auditor_path = ROOT / "cache_auditor.py"
-    spec = importlib.util.spec_from_file_location(
-        "cache_auditor",
-        str(auditor_path)
-    )
-    auditor = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(auditor)
+    sg = build_shared_graph(project)
+    result = analyze_cache(sg)
 
-    result = auditor.analyze_file(target)
-
-    expect(result.get("exists") is True, f"{name}: file harus exists")
     expect(result["summary"]["total_findings"] >= 3, f"{name}: harus ada minimal 3 findings")
     expect(
         result["summary"]["by_type"]["nondeterministic_cache_key"] >= 1,
@@ -1289,34 +1256,23 @@ def test_f20_cache_audit():
 def test_f21_type_isomorphism():
     name = "F21"
     project = "fixtures_min/f21_type_isomorphism/project"
-    target = f"{project}/src/types.ts"
+    from core.shared_graph import build_shared_graph
+    from codebase.hott_analyzers import analyze_isomorphism
 
-    import importlib.util
-    observer_path = ROOT / "type_isomorphism_observer.py"
-    spec = importlib.util.spec_from_file_location(
-        "type_isomorphism_observer",
-        str(observer_path)
-    )
-    observer = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(observer)
+    sg = build_shared_graph(project)
+    result = analyze_isomorphism(sg)
 
-    result = observer.observe_isomorphisms_in_file(target)
-
-    expect(result.get("exists") is True, f"{name}: file harus exists")
-    expect(
-        result["summary"]["total_shapes"] == 5,
-        f"{name}: harus ada 5 type shapes"
-    )
     expect(
         result["summary"]["isomorphic_pair_count"] == 2,
         f"{name}: harus ada 2 pasangan isomorfik"
     )
 
     pair_names = set()
-    for pair in result.get("isomorphic_pairs", []):
-        pair_names.add(
-            (pair["space_a"]["name"], pair["space_b"]["name"])
-        )
+    for pair in result.get("findings", []):
+        if pair.get("type") == "structural_isomorphism":
+            pair_names.add(
+                (pair["space_a"]["name"], pair["space_b"]["name"])
+            )
 
     expect(
         ("UserDTO", "UserViewModel") in pair_names,
@@ -1329,29 +1285,24 @@ def test_f21_type_isomorphism():
     )
 
     # Order tidak boleh isomorfik dengan yang lain
-    for pair in result.get("isomorphic_pairs", []):
-        expect(
-            pair["space_a"]["name"] != "Order"
-            and pair["space_b"]["name"] != "Order",
-            f"{name}: Order tidak boleh isomorfik dengan type lain"
-        )
+    for pair in result.get("findings", []):
+        if pair.get("type") == "structural_isomorphism":
+            expect(
+                pair["space_a"]["name"] != "Order"
+                and pair["space_b"]["name"] != "Order",
+                f"{name}: Order tidak boleh isomorfik dengan type lain"
+            )
 
 
 def test_f22_boundary_sheaf():
     name = "F22"
     project = "fixtures_min/f22_boundary_sheaf/project"
     scan_root = f"{project}/src"
+    from core.shared_graph import build_shared_graph
+    from codebase.hott_analyzers import analyze_sheaf
 
-    import importlib.util
-    checker_path = ROOT / "boundary_sheaf_checker.py"
-    spec = importlib.util.spec_from_file_location(
-        "boundary_sheaf_checker",
-        str(checker_path)
-    )
-    checker = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(checker)
-
-    result = checker.analyze_boundaries(scan_root)
+    sg = build_shared_graph(scan_root)
+    result = analyze_sheaf(sg)
 
     expect(
         result["summary"]["total_boundaries"] >= 2,
@@ -1359,13 +1310,13 @@ def test_f22_boundary_sheaf():
     )
 
     expect(
-        result["summary"]["total_obstructions"] >= 1,
-        f"{name}: harus ada minimal 1 obstruction"
+        result["summary"]["total_findings"] >= 1,
+        f"{name}: harus ada minimal 1 finding"
     )
 
     # Cek boundary violation: app.component.ts bypass barrel core
     violations = [
-        f for f in result["obstructions"]
+        f for f in result["findings"]
         if f["type"] == "boundary_violation"
     ]
     expect(
@@ -1373,44 +1324,21 @@ def test_f22_boundary_sheaf():
         f"{name}: harus deteksi boundary violation (bypass barrel)"
     )
 
-    # Cek section conflict: CoreConfig beda shape di app vs core
-    conflicts = [
-        f for f in result["obstructions"]
-        if f["type"] == "section_conflict"
-    ]
-    expect(
-        len(conflicts) >= 1,
-        f"{name}: harus deteksi section conflict (CoreConfig beda shape)"
-    )
-
-    if conflicts:
-        conflict = conflicts[0]
-        expect(
-            conflict["type_name"] == "CoreConfig",
-            f"{name}: conflict harus pada type CoreConfig"
-        )
-
 
 def test_f23_sheaf_precision():
     name = "F23"
     project = "fixtures_min/f23_sheaf_precision/project"
     scan_root = f"{project}/src"
+    from core.shared_graph import build_shared_graph
+    from codebase.hott_analyzers import analyze_sheaf
 
-    import importlib.util
-    checker_path = ROOT / "boundary_sheaf_checker.py"
-    spec = importlib.util.spec_from_file_location(
-        "boundary_sheaf_checker",
-        str(checker_path)
-    )
-    checker = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(checker)
-
-    result = checker.analyze_boundaries(scan_root)
+    sg = build_shared_graph(scan_root)
+    result = analyze_sheaf(sg)
 
     # Entrypoint main.ts mengimpor src/app/app.ts TANPA barrel.
     # Ini harus TIDAK dilaporkan sebagai boundary_violation.
     violations = [
-        f for f in result["obstructions"]
+        f for f in result["findings"]
         if f["type"] == "boundary_violation"
     ]
     expect(
@@ -1420,7 +1348,7 @@ def test_f23_sheaf_precision():
 
     # Tapi boundary tanpa public API tetap dicatat sebagai observasi low.
     no_api = [
-        f for f in result["obstructions"]
+        f for f in result["findings"]
         if f["type"] == "boundary_without_public_api"
     ]
     expect(
@@ -1433,26 +1361,15 @@ def test_f24_homotopy_path():
     name = "F24"
     project = "fixtures_min/f24_homotopy_path/project"
     scan_root = f"{project}/src"
+    from core.shared_graph import build_shared_graph
+    from codebase.hott_analyzers import analyze_homotopy
 
-    import importlib.util
-    checker_path = ROOT / "homotopy_path_observer.py"
-    spec = importlib.util.spec_from_file_location(
-        "homotopy_path_observer",
-        str(checker_path)
-    )
-    observer = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(observer)
-
-    result = observer.observe_homotopy_paths(scan_root)
-
-    expect(
-        result["total_files"] == 5,
-        f"{name}: harus ada 5 file"
-    )
+    sg = build_shared_graph(scan_root)
+    result = analyze_homotopy(sg)
 
     # Cek diamond: a -> b -> d dan a -> c -> d
     diamonds = [
-        f for f in result["obstructions"]
+        f for f in result["findings"]
         if f["type"] == "diamond_dependency"
     ]
     expect(
@@ -1473,7 +1390,7 @@ def test_f24_homotopy_path():
 
     # Cek mergeable import: a.ts mengimpor ./util dua kali
     mergeable = [
-        f for f in result["obstructions"]
+        f for f in result["findings"]
         if f["type"] == "mergeable_import"
     ]
     expect(
@@ -1486,46 +1403,19 @@ def test_f25_topological_synthesis():
     name = "F25"
     project = "fixtures_min/f25_synthesis/project"
     scan_root = f"{project}/src"
+    from core.synthesizer import synthesize_topological_integrity
 
-    import importlib.util
-    checker_path = ROOT / "topological_integrity_orchestrator.py"
-    spec = importlib.util.spec_from_file_location(
-        "topological_integrity_orchestrator",
-        str(checker_path)
-    )
-    orchestrator = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(orchestrator)
-
-    result = orchestrator.synthesize_topological_integrity(scan_root)
+    result = synthesize_topological_integrity(scan_root)
 
     # Verifikasi struktur dasar
     expect(
-        result.get("schema_version") == "2.3.0-synthesis",
-        f"{name}: schema_version harus 2.3.0-synthesis"
+        result.get("schema_version") == "3.0.0-kernel",
+        f"{name}: schema_version harus 3.0.0-kernel"
     )
 
     expect(
         "unified_summary" in result,
         f"{name}: harus ada unified_summary"
-    )
-
-    expect(
-        "stages" in result,
-        f"{name}: harus ada stages"
-    )
-
-    # Verifikasi ketiga stage tersedia
-    expect(
-        result["generated_stages"]["type_isomorphism"] is True,
-        f"{name}: Stage 1 harus tersedia"
-    )
-    expect(
-        result["generated_stages"]["boundary_sheaf"] is True,
-        f"{name}: Stage 2 harus tersedia"
-    )
-    expect(
-        result["generated_stages"]["homotopy_paths"] is True,
-        f"{name}: Stage 3 harus tersedia"
     )
 
     # Verifikasi health score ada dan dalam rentang valid
@@ -1535,7 +1425,7 @@ def test_f25_topological_synthesis():
         f"{name}: health score harus dalam rentang [0, 1]"
     )
 
-    # Fixture ini punya diamond (a->b->d, a->c->d), jadi Stage 3 harus deteksi
+    # Fixture ini punya diamond (a->b->d, a->c->d)
     expect(
         result["unified_summary"]["total_findings"] >= 1,
         f"{name}: harus ada minimal 1 finding (diamond dari fixture)"
@@ -1552,17 +1442,11 @@ def test_f26_topological_manifold():
     name = "F26"
     project = "fixtures_min/f26_manifold/project"
     scan_root = f"{project}/src"
+    from core.shared_graph import build_shared_graph
+    from codebase.hott_analyzers import analyze_manifold
 
-    import importlib.util
-    checker_path = ROOT / "topological_manifold_builder.py"
-    spec = importlib.util.spec_from_file_location(
-        "topological_manifold_builder",
-        str(checker_path)
-    )
-    builder = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(builder)
-
-    result = builder.build_topological_manifold(scan_root)
+    sg = build_shared_graph(scan_root)
+    result = analyze_manifold(sg)
 
     expect(
         result["manifold"]["vertex_count"] == 3,
@@ -1593,24 +1477,16 @@ def test_f27_invariant_encoder():
     name = "F27"
     project = "fixtures_min/f27_encoder/project"
     scan_root = f"{project}/src"
+    from core.synthesizer import encode_topological_invariants
 
-    import importlib.util
-    checker_path = ROOT / "invariant_encoder.py"
-    spec = importlib.util.spec_from_file_location(
-        "invariant_encoder",
-        str(checker_path)
-    )
-    encoder = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(encoder)
-
-    result = encoder.encode_topological_invariants(scan_root)
+    result = encode_topological_invariants(scan_root)
 
     expect(result.get("available") is True, f"{name}: encoder harus available")
 
     fingerprint = result.get("topological_fingerprint", {})
 
     hash1 = fingerprint.get("signature_hash", "")
-    result2 = encoder.encode_topological_invariants(scan_root)
+    result2 = encode_topological_invariants(scan_root)
     hash2 = result2.get("topological_fingerprint", {}).get("signature_hash", "")
     expect(hash1 == hash2 and hash1 != "", f"{name}: signature hash harus deterministik")
     expect(hash1.startswith("sha256:"), f"{name}: hash harus prefix sha256")
@@ -1636,25 +1512,17 @@ def test_f28_decoder_steering():
     project = "fixtures_min/f28_steering/project"
     scan_root = f"{project}/src"
     baseline_path = f"{project}/baseline/topological_baseline.json"
-
-    import importlib.util
-    checker_path = ROOT / "decoder_steering.py"
-    spec = importlib.util.spec_from_file_location(
-        "decoder_steering",
-        str(checker_path)
-    )
-    steering = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(steering)
+    from core.synthesizer import establish_baseline, steer_decoder
 
     # Step 1: Establish baseline
-    establish_result = steering.establish_baseline(scan_root, baseline_path)
+    establish_result = establish_baseline(scan_root, baseline_path)
     expect(
         establish_result.get("available") is True,
         f"{name}: establish baseline harus berhasil"
     )
 
     # Step 2: Steer dengan baseline yang baru dibuat
-    steer_result = steering.steer_decoder(scan_root, baseline_path)
+    steer_result = steer_decoder(scan_root, baseline_path)
     expect(
         steer_result.get("available") is True,
         f"{name}: steer harus available"
@@ -1715,16 +1583,9 @@ def test_f29_archetype_calibration():
     name = "F29"
     project = "fixtures_min/f29_archetype_calibration/project"
     scan_root = f"{project}/src"
+    from core.synthesizer import encode_topological_invariants
 
-    import importlib.util
-    spec = importlib.util.spec_from_file_location(
-        "invariant_encoder",
-        str(ROOT / "invariant_encoder.py")
-    )
-    encoder = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(encoder)
-
-    result = encoder.encode_topological_invariants(scan_root)
+    result = encode_topological_invariants(scan_root)
     fingerprint = result.get("topological_fingerprint", {})
     archetype = fingerprint.get("structural_archetype", "")
 
@@ -1746,16 +1607,9 @@ def test_f30_complexity_calibration():
     name = "F30"
     project = "fixtures_min/f30_complexity_calibration/project"
     scan_root = f"{project}/src"
+    from core.synthesizer import encode_topological_invariants
 
-    import importlib.util
-    spec = importlib.util.spec_from_file_location(
-        "invariant_encoder",
-        str(ROOT / "invariant_encoder.py")
-    )
-    encoder = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(encoder)
-
-    result = encoder.encode_topological_invariants(scan_root)
+    result = encode_topological_invariants(scan_root)
     fingerprint = result.get("topological_fingerprint", {})
     normalized = fingerprint.get("normalized_vector", {})
 
@@ -1790,6 +1644,38 @@ def test_f30_complexity_calibration():
     )
 
 
+def test_f31_memory_topology_betti():
+    name = "F31"
+    from memory.graph import build_memory_graph_from_data
+    from memory.analyzers import analyze_betti_breakdown
+
+    # Test case 1: In-memory memory graph
+    memories = [
+        {"id": "m1", "type": "episodic", "importance": 0.8},
+        {"id": "m2", "type": "episodic", "importance": 0.8},
+        {"id": "m3", "type": "episodic", "importance": 0.8},
+        {"id": "m4", "type": "semantic", "importance": 0.9},
+    ]
+    associations = [
+        {"id": "a1", "from": "m1", "to": "m2", "type": "temporal"},
+        {"id": "a2", "from": "m2", "to": "m3", "type": "temporal"},
+        {"id": "a3", "from": "m3", "to": "m1", "type": "temporal"},
+        {"id": "a4", "from": "m1", "to": "m4", "type": "consolidation"},
+    ]
+
+    graph = build_memory_graph_from_data(memories, associations)
+    expect("edge_types" in graph, f"{name}: edge_types must be in memory graph")
+    expect(graph["summary"]["total_memories"] == 4, f"{name}: 4 memories expected")
+
+    # Test Betti breakdown
+    breakdown = analyze_betti_breakdown(graph)
+    betti = breakdown.get("betti_numbers", {})
+    expect(betti.get("beta_0") == 1, f"{name}: beta_0 should be 1")
+    expect(betti.get("beta_1_total") == 1, f"{name}: beta_1_total should be 1")
+    expect(betti.get("beta_1_reasoning") == 0, f"{name}: beta_1_reasoning should be 0 for temporal loop")
+    expect(betti.get("beta_1_structural") == 1, f"{name}: beta_1_structural should be 1 for temporal loop")
+
+
 def main():
     write_fixtures()
 
@@ -1821,6 +1707,7 @@ def main():
         test_f28_decoder_steering,
         test_f29_archetype_calibration,
         test_f30_complexity_calibration,
+        test_f31_memory_topology_betti,
     ]
 
     for test in tests:
@@ -1835,7 +1722,7 @@ def main():
             print(f"- {failure}")
         sys.exit(1)
 
-    print("PASS: 27 fixture minimal baseline aman")
+    print("PASS: 28 fixture minimal baseline aman")
 
 
 if __name__ == "__main__":

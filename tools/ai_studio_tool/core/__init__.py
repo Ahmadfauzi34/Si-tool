@@ -1,0 +1,51 @@
+"""
+Core Domain — Shared Infrastructure, Registry, Synthesizer & Safety
+"""
+
+from core.shared_graph import (
+    build_shared_graph,
+    DEFAULT_IGNORE_DIRS,
+    SOURCE_EXTENSIONS,
+)
+from core.analyzer_registry import (
+    ANALYZER_REGISTRY,
+    register_analyzer,
+    run_analyzers,
+    get_available_analyzers,
+)
+from core.synthesizer import (
+    synthesize_topological_integrity,
+    encode_topological_invariants,
+    establish_baseline,
+    load_baseline,
+    steer_decoder,
+)
+from core.safety import (
+    check_memory_association_safety,
+    check_betti_preservation,
+    check_fiber_state_safety,
+)
+from core.deprecation import (
+    deprecated_tool,
+    DEPRECATION_MAP,
+)
+
+__all__ = [
+    "build_shared_graph",
+    "DEFAULT_IGNORE_DIRS",
+    "SOURCE_EXTENSIONS",
+    "ANALYZER_REGISTRY",
+    "register_analyzer",
+    "run_analyzers",
+    "get_available_analyzers",
+    "synthesize_topological_integrity",
+    "encode_topological_invariants",
+    "establish_baseline",
+    "load_baseline",
+    "steer_decoder",
+    "check_memory_association_safety",
+    "check_betti_preservation",
+    "check_fiber_state_safety",
+    "deprecated_tool",
+    "DEPRECATION_MAP",
+]

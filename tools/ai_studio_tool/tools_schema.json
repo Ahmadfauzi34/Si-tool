@@ -1,13 +1,13 @@
 [
   {
     "name": "hott_kernel",
-    "description": "Unified HoTT Kernel: single entry point untuk seluruh analisis codebase dan memory store. Menjalankan 12 codebase analyzer (topo, perf, hott) dan 5 memory analyzer. Mode 'analyze' untuk findings, 'synthesize' untuk fingerprint + health score + correlations, 'steer' untuk drift detection + steering signals, 'establish' untuk baseline, 'impact'/'outline'/'brief' untuk targeted file analysis, 'memory_store'/'memory_recall'/'memory_analyze'/'memory_stats'/'memory_associate'/'memory_consolidate'/'memory_steer'/'memory_establish'/'memory_drift' untuk memory domain. Gunakan ini sebagai pengganti semua tool terpisah.",
+    "description": "Unified HoTT Kernel: single entry point untuk seluruh analisis codebase dan memory store. Menjalankan 12 codebase analyzer (topo, perf, hott) dan 5 memory analyzer. Mode 'analyze' untuk findings, 'synthesize' untuk fingerprint + health score + correlations, 'steer' untuk drift detection + steering signals, 'establish' untuk baseline, 'impact'/'outline'/'brief' untuk targeted file analysis, 'memory_*' untuk memory domain, 'xanalyze'/'xsteer'/'xcontext' untuk cross-domain intelligence. Gunakan ini sebagai pengganti semua tool terpisah.",
     "parameters": {
       "type": "OBJECT",
       "properties": {
         "mode": {
           "type": "STRING",
-          "description": "Mode operasi: analyze | synthesize | steer | establish | impact | outline | brief | analyzers | memory_store | memory_recall | memory_analyze | memory_stats | memory_associate | memory_consolidate | memory_steer | memory_establish | memory_drift"
+          "description": "Mode operasi: analyze | synthesize | steer | establish | impact | outline | brief | analyzers | memory_store | memory_recall | memory_analyze | memory_stats | memory_associate | memory_consolidate | memory_steer | memory_establish | memory_drift | xanalyze | xsteer | xcontext"
         },
         "scan_root": {
           "type": "STRING",

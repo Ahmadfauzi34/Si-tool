@@ -23,55 +23,89 @@ if _SCRIPT_DIR not in sys.path:
     sys.path.insert(0, _SCRIPT_DIR)
 
 try:
-    from shared_graph import build_shared_graph
+    from core.shared_graph import build_shared_graph
     SHARED_GRAPH_AVAILABLE = True
 except ImportError:
-    SHARED_GRAPH_AVAILABLE = False
+    try:
+        from shared_graph import build_shared_graph
+        SHARED_GRAPH_AVAILABLE = True
+    except ImportError:
+        SHARED_GRAPH_AVAILABLE = False
 
 try:
-    from analyzer_registry import run_analyzers, get_available_analyzers
+    from core.analyzer_registry import run_analyzers, get_available_analyzers
     REGISTRY_AVAILABLE = True
 except ImportError:
-    REGISTRY_AVAILABLE = False
+    try:
+        from analyzer_registry import run_analyzers, get_available_analyzers
+        REGISTRY_AVAILABLE = True
+    except ImportError:
+        REGISTRY_AVAILABLE = False
 
 try:
-    from topology_analyzers import query_impact, query_outline, query_brief
+    from codebase.targeted_queries import query_impact, query_outline, query_brief
     TOPO_QUERIES_AVAILABLE = True
 except ImportError:
-    TOPO_QUERIES_AVAILABLE = False
+    try:
+        from topology_analyzers import query_impact, query_outline, query_brief
+        TOPO_QUERIES_AVAILABLE = True
+    except ImportError:
+        TOPO_QUERIES_AVAILABLE = False
 
 try:
-    from topological_integrity_orchestrator import synthesize_topological_integrity
+    from core.synthesizer import synthesize_topological_integrity
     SYNTHESIS_AVAILABLE = True
 except ImportError:
-    SYNTHESIS_AVAILABLE = False
+    try:
+        from topological_integrity_orchestrator import synthesize_topological_integrity
+        SYNTHESIS_AVAILABLE = True
+    except ImportError:
+        SYNTHESIS_AVAILABLE = False
 
 try:
-    from invariant_encoder import encode_topological_invariants
+    from core.synthesizer import encode_topological_invariants
     ENCODER_AVAILABLE = True
 except ImportError:
-    ENCODER_AVAILABLE = False
+    try:
+        from invariant_encoder import encode_topological_invariants
+        ENCODER_AVAILABLE = True
+    except ImportError:
+        ENCODER_AVAILABLE = False
 
 try:
-    from decoder_steering import establish_baseline, steer_decoder
+    from core.synthesizer import establish_baseline, steer_decoder
     STEERING_AVAILABLE = True
 except ImportError:
-    STEERING_AVAILABLE = False
+    try:
+        from decoder_steering import establish_baseline, steer_decoder
+        STEERING_AVAILABLE = True
+    except ImportError:
+        STEERING_AVAILABLE = False
 
 try:
-    from memory_store import (
+    from memory.store import (
         store_memory, recall_memories, get_memory_stats,
         load_store, save_store, access_memory, get_associations_for,
         store_association, consolidate_memories,
     )
-    from memory_graph import build_memory_graph
-    from memory_analyzers import run_memory_analyzers, MEMORY_ANALYZER_REGISTRY
+    from memory.graph import build_memory_graph
+    from memory.analyzers import run_memory_analyzers, MEMORY_ANALYZER_REGISTRY
     MEMORY_AVAILABLE = True
 except ImportError:
-    MEMORY_AVAILABLE = False
+    try:
+        from memory_store import (
+            store_memory, recall_memories, get_memory_stats,
+            load_store, save_store, access_memory, get_associations_for,
+            store_association, consolidate_memories,
+        )
+        from memory_graph import build_memory_graph
+        from memory_analyzers import run_memory_analyzers, MEMORY_ANALYZER_REGISTRY
+        MEMORY_AVAILABLE = True
+    except ImportError:
+        MEMORY_AVAILABLE = False
 
 try:
-    from memory_synthesizer import (
+    from memory.synthesizer import (
         compute_memory_fingerprint,
         establish_memory_baseline,
         load_memory_baseline,
@@ -81,7 +115,70 @@ try:
     )
     MEMORY_SYNTH_AVAILABLE = True
 except ImportError:
-    MEMORY_SYNTH_AVAILABLE = False
+    try:
+        from memory_synthesizer import (
+            compute_memory_fingerprint,
+            establish_memory_baseline,
+            load_memory_baseline,
+            detect_memory_drift,
+            generate_memory_steering_signals,
+            assemble_memory_prompt_block,
+        )
+        MEMORY_SYNTH_AVAILABLE = True
+    except ImportError:
+        MEMORY_SYNTH_AVAILABLE = False
+
+try:
+    from bridge.xanalyze import (
+        filter_findings_for_memory,
+        auto_store_findings,
+        check_consolidation_trigger,
+    )
+    from bridge.xsteer import cross_domain_steer
+    from bridge.xcontext import get_memory_context_for_file
+    CROSS_DOMAIN_AVAILABLE = True
+except ImportError:
+    try:
+        from cross_domain_bridge import (
+            filter_findings_for_memory,
+            auto_store_findings,
+            check_consolidation_trigger,
+            cross_domain_steer,
+            get_memory_context_for_file,
+        )
+        CROSS_DOMAIN_AVAILABLE = True
+    except ImportError:
+        CROSS_DOMAIN_AVAILABLE = False
+
+try:
+    from context.fibration import (
+        init_fiber, lift_to_fiber, descend_from_fiber,
+        start_section, add_to_section, get_section_status,
+        fiber_status, switch_base,
+        transport_from_archive, list_archived_fibers,
+    )
+    FIBRATION_AVAILABLE = True
+except ImportError:
+    try:
+        from memory_fibration import (
+            init_fiber, lift_to_fiber, descend_from_fiber,
+            start_section, add_to_section, get_section_status,
+            fiber_status, switch_base,
+            transport_from_archive, list_archived_fibers,
+        )
+        FIBRATION_AVAILABLE = True
+    except ImportError:
+        FIBRATION_AVAILABLE = False
+
+try:
+    from memory.kan_extension import left_kan_extension, right_kan_extension, kan_retrieve
+    KAN_EXTENSION_AVAILABLE = True
+except ImportError:
+    try:
+        from memory_kan_extension import left_kan_extension, right_kan_extension, kan_retrieve
+        KAN_EXTENSION_AVAILABLE = True
+    except ImportError:
+        KAN_EXTENSION_AVAILABLE = False
 
 
 def kernel_memory_store(
@@ -408,6 +505,546 @@ def kernel_memory_drift() -> Dict[str, Any]:
         "fingerprint": fingerprint,
         "drift_analysis": drift,
     }
+
+
+def kernel_memory_consolidate_by_tag(
+    tag: str,
+    content: Optional[str] = None,
+    importance: float = 0.9,
+) -> Dict[str, Any]:
+    """Konsolidasi memori berdasarkan tag."""
+    if not MEMORY_AVAILABLE:
+        return {"error": "memory modules not available"}
+    try:
+        from memory_store import consolidate_by_tag
+        result = consolidate_by_tag(tag=tag, content=content, importance=importance)
+        return {
+            "schema_version": "4.0.0-memory",
+            "mode": "memory_consolidate_by_tag",
+            **result,
+        }
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+def kernel_memory_consolidate_auto(
+    min_group_size: int = 3,
+    importance: float = 0.9,
+) -> Dict[str, Any]:
+    """Otomatis konsolidasi semua tag groups yang memenuhi threshold."""
+    if not MEMORY_AVAILABLE:
+        return {"error": "memory modules not available"}
+    try:
+        from memory_store import consolidate_by_tag_auto
+        result = consolidate_by_tag_auto(
+            min_group_size=min_group_size,
+            importance=importance,
+        )
+        return {
+            "schema_version": "4.0.0-memory",
+            "mode": "memory_consolidate_auto",
+            **result,
+        }
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+def kernel_memory_unconsolidated_tags() -> Dict[str, Any]:
+    """Lihat ringkasan unconsolidated memories by tag."""
+    if not MEMORY_AVAILABLE:
+        return {"error": "memory modules not available"}
+    try:
+        from memory_store import get_unconsolidated_by_tag
+        result = get_unconsolidated_by_tag()
+        return {
+            "schema_version": "4.0.0-memory",
+            "mode": "memory_unconsolidated_tags",
+            **result,
+        }
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+def kernel_memory_betti_breakdown() -> Dict[str, Any]:
+    """Hitung β₁ breakdown per kategori edge type."""
+    if not MEMORY_AVAILABLE:
+        return {"error": "memory modules not available"}
+    try:
+        from memory_graph import build_memory_graph
+        from memory_analyzers import analyze_betti_breakdown
+        memory_graph = build_memory_graph()
+        result = analyze_betti_breakdown(memory_graph)
+        return {
+            "schema_version": "4.0.0-memory",
+            "mode": "memory_betti_breakdown",
+            **result,
+        }
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+def kernel_memory_compact(
+    only_consolidated: bool = True,
+    memory_type: str = "episodic",
+    dry_run: bool = False,
+    restore: bool = False,
+    restore_all: bool = False,
+    restore_id: Optional[str] = None,
+    stats: bool = False,
+) -> Dict[str, Any]:
+    """Memory compact: quotient forgetting untuk archived memories."""
+    if not MEMORY_AVAILABLE:
+        return {"error": "memory modules not available"}
+
+    try:
+        from memory_store import (
+            compact_memories, get_archive_stats,
+            restore_memory, restore_all_archived,
+        )
+        from memory_graph import build_memory_graph
+        from memory_analyzers import analyze_manifold
+    except ImportError as exc:
+        return {"error": f"import failed: {exc}"}
+
+    # Mode: stats
+    if stats:
+        archive_stats = get_archive_stats()
+        # Hitung Betti untuk active graph
+        active_graph = build_memory_graph(include_archived=False)
+        active_manifold = analyze_manifold(active_graph)
+        # Hitung Betti untuk full graph (termasuk archived)
+        full_graph = build_memory_graph(include_archived=True)
+        full_manifold = analyze_manifold(full_graph)
+
+        return {
+            "schema_version": "4.0.0-memory",
+            "mode": "memory_compact_stats",
+            "archive_stats": archive_stats,
+            "active_graph_betti": active_manifold["manifold"]["betti_numbers"],
+            "full_graph_betti": full_manifold["manifold"]["betti_numbers"],
+        }
+
+    # Mode: restore
+    if restore_all:
+        result = restore_all_archived()
+        return {
+            "schema_version": "4.0.0-memory",
+            "mode": "memory_compact_restore",
+            **result,
+        }
+
+    if restore_id:
+        result = restore_memory(restore_id)
+        if result is None:
+            return {"error": f"Memory not found: {restore_id}"}
+        return {
+            "schema_version": "4.0.0-memory",
+            "mode": "memory_compact_restore",
+            "restored": result,
+        }
+
+    # Mode: compact (dengan Betti impact analysis)
+    # Hitung Betti SEBELUM compact
+    graph_before = build_memory_graph(include_archived=False)
+    manifold_before = analyze_manifold(graph_before)
+    betti_before = manifold_before["manifold"]["betti_numbers"]
+
+    # Execute compact
+    compact_result = compact_memories(
+        only_consolidated=only_consolidated,
+        memory_type=memory_type,
+        dry_run=dry_run,
+    )
+
+    if dry_run:
+        return {
+            "schema_version": "4.0.0-memory",
+            "mode": "memory_compact",
+            **compact_result,
+            "betti_before": betti_before,
+        }
+
+    # Hitung Betti SESUDAH compact
+    graph_after = build_memory_graph(include_archived=False)
+    manifold_after = analyze_manifold(graph_after)
+    betti_after = manifold_after["manifold"]["betti_numbers"]
+
+    # Hitung Betti impact
+    betti_impact = {
+        "beta_0": {"before": betti_before["beta_0"], "after": betti_after["beta_0"],
+                    "delta": betti_after["beta_0"] - betti_before["beta_0"]},
+        "beta_1": {"before": betti_before["beta_1"], "after": betti_after["beta_1"],
+                    "delta": betti_after["beta_1"] - betti_before["beta_1"]},
+        "beta_2": {"before": betti_before["beta_2"], "after": betti_after["beta_2"],
+                    "delta": betti_after["beta_2"] - betti_before["beta_2"]},
+    }
+
+    return {
+        "schema_version": "4.0.0-memory",
+        "mode": "memory_compact",
+        **compact_result,
+        "betti_before": betti_before,
+        "betti_after": betti_after,
+        "betti_impact": betti_impact,
+    }
+
+
+def kernel_memory_bridge(
+    from_id: str,
+    to_id: str,
+    assoc_type: str = "semantic",
+    strength: float = 0.7,
+    safe_mode: bool = True,
+) -> Dict[str, Any]:
+    """Manual bridge antara dua memories."""
+    if not MEMORY_AVAILABLE:
+        return {"error": "memory modules not available"}
+    try:
+        from memory_store import bridge_memories
+        result = bridge_memories(
+            from_id=from_id,
+            to_id=to_id,
+            assoc_type=assoc_type,
+            strength=strength,
+            safe_mode=safe_mode,
+        )
+        return {
+            "schema_version": "4.0.0-memory",
+            "mode": "memory_bridge",
+            **result,
+        }
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+def kernel_memory_bridge_auto(
+    min_shared_tags: int = 1,
+    assoc_type: str = "semantic",
+    safe_mode: bool = True,
+    dry_run: bool = False,
+) -> Dict[str, Any]:
+    """Auto bridge: hubungkan semantic memories yang share tags."""
+    if not MEMORY_AVAILABLE:
+        return {"error": "memory modules not available"}
+    try:
+        from memory_store import bridge_auto
+        result = bridge_auto(
+            min_shared_tags=min_shared_tags,
+            assoc_type=assoc_type,
+            safe_mode=safe_mode,
+            dry_run=dry_run,
+        )
+        return {
+            "schema_version": "4.0.0-memory",
+            "mode": "memory_bridge_auto",
+            **result,
+        }
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+def kernel_memory_bridge_candidates(
+    min_shared_tags: int = 1,
+) -> Dict[str, Any]:
+    """Lihat kandidat bridge sebelum eksekusi."""
+    if not MEMORY_AVAILABLE:
+        return {"error": "memory modules not available"}
+    try:
+        from memory_store import get_bridge_candidates
+        result = get_bridge_candidates(min_shared_tags=min_shared_tags)
+        return {
+            "schema_version": "4.0.0-memory",
+            "mode": "memory_bridge_candidates",
+            **result,
+        }
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+def kernel_memory_kan(
+    query: str,
+    mode: str = "both",
+    max_depth: int = 2,
+) -> Dict[str, Any]:
+    """Kan Extension retrieval: structured completion."""
+    if not KAN_EXTENSION_AVAILABLE:
+        return {"error": "memory_kan_extension not available"}
+
+    try:
+        result = kan_retrieve(query, mode=mode, max_depth=max_depth)
+        return {
+            "schema_version": "4.0.0-memory",
+            "mode": "memory_kan",
+            **result,
+        }
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+def kernel_xanalyze(
+    scan_root: str = ".",
+    analyzer_names: Optional[List[str]] = None,
+    output_mode: str = "summary",
+    auto_store: bool = True,
+) -> Dict[str, Any]:
+    """
+    Cross-Domain Analyze: analisis codebase + auto-store findings ke memory.
+    """
+    if not SHARED_GRAPH_AVAILABLE or not REGISTRY_AVAILABLE:
+        return {"error": "required modules not available"}
+
+    # Step 1: Build graph + run analyzers
+    graph = build_shared_graph(scan_root)
+    analyzer_output = run_analyzers(graph, analyzer_names)
+    analyzer_results = analyzer_output.get("results", {})
+
+    # Step 2: Synthesize (untuk correlations & fingerprint)
+    total_files = graph.get("summary", {}).get("total_files", 0)
+    health_score = _compute_topological_health_score(analyzer_output, total_files)
+    correlations = _detect_cross_analyzer_correlations(graph, analyzer_output)
+    fingerprint = {}
+    if ENCODER_AVAILABLE:
+        enc_res = encode_topological_invariants(scan_root)
+        if enc_res.get("available"):
+            fingerprint = enc_res.get("topological_fingerprint", {})
+    if not fingerprint and "hott.manifold" in analyzer_results:
+        manifold_data = analyzer_results["hott.manifold"].get("manifold", {})
+        fingerprint = {
+            "signature_hash": "sha256:unknown",
+            "complexity_score": manifold_data.get("complexity_score", 0.0),
+            "structural_archetype": manifold_data.get("structural_archetype", "unknown"),
+        }
+
+    # Step 3: Selective filter + auto-store
+    store_result = {"stored_count": 0, "skipped": True}
+    if auto_store and CROSS_DOMAIN_AVAILABLE:
+        storeable = filter_findings_for_memory(analyzer_results, correlations)
+        if storeable:
+            store_result = auto_store_findings(storeable, scan_root)
+        else:
+            store_result = {"stored_count": 0, "reason": "no storeable findings"}
+
+    # Step 4: Check consolidation trigger
+    consolidation_signal = {"trigger": False}
+    if CROSS_DOMAIN_AVAILABLE and store_result.get("stored_count", 0) > 0:
+        consolidation_signal = check_consolidation_trigger()
+
+    # Step 5: Format output
+    total_findings = sum(
+        len(r.get("findings", [])) for r in analyzer_results.values()
+    )
+    severity_counts = {"high": 0, "medium": 0, "low": 0, "info": 0}
+    for r in analyzer_results.values():
+        for f in r.get("findings", []):
+            sev = f.get("severity", "info")
+            if sev in severity_counts:
+                severity_counts[sev] += 1
+
+    if output_mode == "summary":
+        return {
+            "schema_version": "4.0.0-memory",
+            "mode": "xanalyze",
+            "scan_root": scan_root,
+            "analysis_summary": {
+                "total_findings": total_findings,
+                "findings_by_severity": severity_counts,
+                "correlation_count": len(correlations),
+                "health_score": health_score,
+                "archetype": fingerprint.get("structural_archetype", "unknown"),
+            },
+            "memory_store_result": store_result,
+            "consolidation_signal": {
+                "consolidation_candidate": consolidation_signal.get("trigger", False),
+                "reasons": consolidation_signal.get("reasons", []),
+            },
+        }
+
+    return {
+        "schema_version": "4.0.0-memory",
+        "mode": "xanalyze",
+        "scan_root": scan_root,
+        "analyzers": analyzer_output,
+        "synthesis": {
+            "fingerprint": fingerprint,
+            "topological_health_score": health_score,
+            "correlations": correlations,
+        },
+        "memory_store_result": store_result,
+        "consolidation_signal": consolidation_signal,
+    }
+
+
+def kernel_xsteer(scan_root: str = ".", output_mode: str = "full") -> Dict[str, Any]:
+    """Cross-Domain Steer: unified codebase + memory steering."""
+    if not CROSS_DOMAIN_AVAILABLE:
+        return {"error": "cross_domain_bridge not available"}
+
+    result = cross_domain_steer(scan_root)
+
+    if output_mode == "summary":
+        return {
+            "schema_version": "4.0.0-memory",
+            "mode": "xsteer",
+            "codebase": result.get("codebase_steering", {}),
+            "memory": result.get("memory_steering", {}),
+            "consolidation_candidate": result.get("consolidation_signal", {}).get("consolidation_candidate", False),
+        }
+
+    return result
+
+
+def kernel_xcontext(file_path: str) -> Dict[str, Any]:
+    """Cross-Domain Context: recall relevant memories untuk file."""
+    if not CROSS_DOMAIN_AVAILABLE:
+        return {"error": "cross_domain_bridge not available"}
+
+    return get_memory_context_for_file(file_path)
+
+
+def kernel_fiber(subcommand: str, args: List[str]) -> Dict[str, Any]:
+    """Router untuk fiber operations."""
+    if not FIBRATION_AVAILABLE:
+        return {"error": "memory_fibration not available"}
+
+    if subcommand == "init":
+        task = args[0] if len(args) > 0 else "general"
+        focus = args[1] if len(args) > 1 else "general"
+        return {"schema_version": "4.0.0-memory", "mode": "fiber_init", **init_fiber(task, focus)}
+
+    elif subcommand == "lift":
+        query = None
+        mem_type = None
+        tags = None
+        max_lift = 10
+        i = 0
+        while i < len(args):
+            if args[i] == "--query" and i + 1 < len(args):
+                query = args[i + 1]; i += 2
+            elif args[i] == "--type" and i + 1 < len(args):
+                mem_type = args[i + 1]; i += 2
+            elif args[i] == "--tags" and i + 1 < len(args):
+                tags = args[i + 1].split(","); i += 2
+            elif args[i] == "--max" and i + 1 < len(args):
+                try:
+                    max_lift = int(args[i + 1])
+                except ValueError:
+                    pass
+                i += 2
+            else:
+                i += 1
+        result = lift_to_fiber(query=query, memory_type=mem_type, tags=tags, max_lift=max_lift)
+        return {"schema_version": "4.0.0-memory", "mode": "fiber_lift", **result}
+
+    elif subcommand == "descend":
+        memory_id = args[0] if args and not args[0].startswith("--") else None
+        descend_all = "--all" in args
+        reason = "task_completed"
+        for i, arg in enumerate(args):
+            if arg == "--reason" and i + 1 < len(args):
+                reason = args[i + 1]
+        result = descend_from_fiber(memory_id=memory_id, descend_all=descend_all, reason=reason)
+        return {"schema_version": "4.0.0-memory", "mode": "fiber_descend", **result}
+
+    elif subcommand == "status":
+        return {"schema_version": "4.0.0-memory", "mode": "fiber_status", **fiber_status()}
+
+    elif subcommand == "section_start":
+        name = args[0] if len(args) > 0 else "unnamed"
+        narrative = args[1] if len(args) > 1 else ""
+        result = start_section(name, narrative)
+        return {"schema_version": "4.0.0-memory", "mode": "fiber_section_start", **result}
+
+    elif subcommand == "section_add":
+        if not args:
+            return {"error": "Usage: fiber section_add <memory_id>"}
+        result = add_to_section(args[0])
+        return {"schema_version": "4.0.0-memory", "mode": "fiber_section_add", **result}
+
+    elif subcommand == "section_status":
+        return {"schema_version": "4.0.0-memory", "mode": "fiber_section_status", **get_section_status()}
+
+    elif subcommand == "switch":
+        task = args[0] if len(args) > 0 else "new_task"
+        focus = args[1] if len(args) > 1 else "new_focus"
+        result = switch_base(task, focus)
+        return {"schema_version": "4.0.0-memory", "mode": "fiber_switch", **result}
+
+    elif subcommand == "list_archives":
+        return kernel_fiber_list_archives()
+
+    elif subcommand == "transport":
+        if len(args) < 3:
+            return {"error": "Usage: fiber transport <source_fiber_id> <new_task> <new_focus> [--threshold 0.6] [--max 10] [--dry-run]"}
+        source_id = args[0]
+        new_task = args[1]
+        new_focus = args[2]
+        threshold = 0.6
+        max_transport = 10
+        dry_run = False
+        i = 3
+        while i < len(args):
+            if args[i] == "--threshold" and i + 1 < len(args):
+                try:
+                    threshold = float(args[i + 1])
+                except ValueError:
+                    pass
+                i += 2
+            elif args[i] == "--max" and i + 1 < len(args):
+                try:
+                    max_transport = int(args[i + 1])
+                except ValueError:
+                    pass
+                i += 2
+            elif args[i] == "--dry-run":
+                dry_run = True
+                i += 1
+            else:
+                i += 1
+        return kernel_fiber_transport(source_id, new_task, new_focus, threshold, max_transport, dry_run)
+
+    else:
+        return {"error": f"Unknown fiber subcommand: {subcommand}"}
+
+
+def kernel_fiber_transport(
+    source_fiber_id: str,
+    new_task: str,
+    new_focus: str,
+    threshold: float = 0.6,
+    max_transport: int = 10,
+    dry_run: bool = False,
+) -> Dict[str, Any]:
+    """Parallel transport dari fiber lama ke fiber baru."""
+    if not FIBRATION_AVAILABLE:
+        return {"error": "memory_fibration not available"}
+    
+    try:
+        from memory_fibration import transport_from_archive
+        result = transport_from_archive(
+            source_fiber_id=source_fiber_id,
+            new_task=new_task,
+            new_focus=new_focus,
+            threshold=threshold,
+            max_transport=max_transport,
+            dry_run=dry_run,
+        )
+        return {"schema_version": "4.0.0-memory", "mode": "fiber_transport", **result}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+def kernel_fiber_list_archives() -> Dict[str, Any]:
+    """List archived fibers."""
+    if not FIBRATION_AVAILABLE:
+        return {"error": "memory_fibration not available"}
+    
+    try:
+        from memory_fibration import list_archived_fibers
+        result = list_archived_fibers()
+        return {"schema_version": "4.0.0-memory", "mode": "fiber_list_archives", **result}
+    except Exception as exc:
+        return {"error": str(exc)}
+
 
 
 
@@ -825,6 +1462,24 @@ def main():
                 "memory_steer": "python3 hott_kernel.py memory_steer [--output full|summary]",
                 "memory_establish": "python3 hott_kernel.py memory_establish",
                 "memory_drift": "python3 hott_kernel.py memory_drift",
+                "memory_compact": "python3 hott_kernel.py memory compact [--consolidated|--all] [--type episodic] [--dry-run|--stats|--restore <id>|--restore-all]",
+                "memory_bridge": "python3 hott_kernel.py memory bridge <from_id> <to_id> [type] [--strength 0.7] [--unsafe]",
+                "memory_bridge_auto": "python3 hott_kernel.py memory bridge_auto [--min-shared-tags 1] [--type semantic] [--dry-run]",
+                "memory_bridge_candidates": "python3 hott_kernel.py memory bridge_candidates [--min-shared-tags 1]",
+                "memory_kan": "python3 hott_kernel.py memory kan <query> [--mode lan|ran|both] [--max-depth 2]",
+                "fiber_init": "python3 hott_kernel.py fiber init <task> <focus>",
+                "fiber_lift": "python3 hott_kernel.py fiber lift [--query q] [--type t] [--tags t1,t2] [--max 10]",
+                "fiber_descend": "python3 hott_kernel.py fiber descend <memory_id> | --all [--reason r]",
+                "fiber_status": "python3 hott_kernel.py fiber status",
+                "fiber_section_start": "python3 hott_kernel.py fiber section_start <name> <narrative>",
+                "fiber_section_add": "python3 hott_kernel.py fiber section_add <memory_id>",
+                "fiber_section_status": "python3 hott_kernel.py fiber section_status",
+                "fiber_switch": "python3 hott_kernel.py fiber switch <new_task> <new_focus>",
+                "fiber_transport": "python3 hott_kernel.py fiber transport <source_fiber_id> <new_task> <new_focus> [--threshold 0.6] [--max 10] [--dry-run]",
+                "fiber_list_archives": "python3 hott_kernel.py fiber list_archives",
+                "xanalyze": "python3 hott_kernel.py xanalyze [root] [--output summary|full] [--no-store] [--analyzers a,b]",
+                "xsteer": "python3 hott_kernel.py xsteer [root] [--output full|summary]",
+                "xcontext": "python3 hott_kernel.py xcontext <file_path>",
             },
         }, indent=2))
         return
@@ -1144,8 +1799,245 @@ def main():
         elif submode == "drift":
             result = kernel_memory_drift()
             print(json.dumps(result, indent=2))
+        elif submode == "betti_breakdown":
+            result = kernel_memory_betti_breakdown()
+            print(json.dumps(result, indent=2))
+        elif submode == "consolidate_by_tag":
+            if len(sys.argv) < 4:
+                print(json.dumps({"error": "Usage: memory consolidate_by_tag <tag> [--content '...'] [--importance 0.9]"}))
+                return
+            m_tag = sys.argv[3]
+            m_content = None
+            m_importance = 0.9
+            for i, arg in enumerate(sys.argv):
+                if arg == "--content" and i + 1 < len(sys.argv):
+                    m_content = sys.argv[i + 1]
+                elif arg == "--importance" and i + 1 < len(sys.argv):
+                    try:
+                        m_importance = float(sys.argv[i + 1])
+                    except ValueError:
+                        pass
+            result = kernel_memory_consolidate_by_tag(m_tag, m_content, m_importance)
+            print(json.dumps(result, indent=2))
+        elif submode == "consolidate_auto":
+            min_size = 3
+            m_importance = 0.9
+            for i, arg in enumerate(sys.argv):
+                if arg == "--min-size" and i + 1 < len(sys.argv):
+                    try:
+                        min_size = int(sys.argv[i + 1])
+                    except ValueError:
+                        pass
+                elif arg == "--importance" and i + 1 < len(sys.argv):
+                    try:
+                        m_importance = float(sys.argv[i + 1])
+                    except ValueError:
+                        pass
+            result = kernel_memory_consolidate_auto(min_size, m_importance)
+            print(json.dumps(result, indent=2))
+        elif submode == "unconsolidated_tags":
+            result = kernel_memory_unconsolidated_tags()
+            print(json.dumps(result, indent=2))
+        elif submode == "compact":
+            # Parse flags
+            only_consolidated = True
+            memory_type = "episodic"
+            dry_run = False
+            restore = False
+            restore_all = False
+            restore_id = None
+            stats = False
+
+            i = 3
+            while i < len(sys.argv):
+                arg = sys.argv[i]
+                if arg == "--consolidated":
+                    only_consolidated = True
+                elif arg == "--all":
+                    only_consolidated = False
+                elif arg == "--type" and i + 1 < len(sys.argv):
+                    memory_type = sys.argv[i + 1]
+                    i += 1
+                elif arg == "--dry-run":
+                    dry_run = True
+                elif arg == "--restore-all":
+                    restore_all = True
+                elif arg == "--restore" and i + 1 < len(sys.argv):
+                    restore_id = sys.argv[i + 1]
+                    i += 1
+                elif arg == "--stats":
+                    stats = True
+                i += 1
+
+            result = kernel_memory_compact(
+                only_consolidated=only_consolidated,
+                memory_type=memory_type,
+                dry_run=dry_run,
+                restore_id=restore_id,
+                restore_all=restore_all,
+                stats=stats,
+            )
+            print(json.dumps(result, indent=2))
+        elif submode == "bridge":
+            # memory bridge <from_id> <to_id> [type] [--strength 0.7] [--unsafe]
+            if len(sys.argv) < 5:
+                print(json.dumps({"error": "Usage: memory bridge <from_id> <to_id> [type] [--strength 0.7]"}))
+                return
+            from_id = sys.argv[3]
+            to_id = sys.argv[4]
+            assoc_type = sys.argv[5] if len(sys.argv) > 5 and not sys.argv[5].startswith("--") else "semantic"
+            strength = 0.7
+            safe_mode = True
+            for i, arg in enumerate(sys.argv):
+                if arg == "--strength" and i + 1 < len(sys.argv):
+                    try:
+                        strength = float(sys.argv[i + 1])
+                    except ValueError:
+                        pass
+                elif arg == "--unsafe":
+                    safe_mode = False
+            result = kernel_memory_bridge(from_id, to_id, assoc_type, strength, safe_mode)
+            print(json.dumps(result, indent=2))
+
+        elif submode == "bridge_auto":
+            # memory bridge_auto [--min-shared-tags 1] [--type semantic] [--dry-run] [--unsafe]
+            min_shared_tags = 1
+            assoc_type = "semantic"
+            dry_run = False
+            safe_mode = True
+            for i, arg in enumerate(sys.argv):
+                if arg == "--min-shared-tags" and i + 1 < len(sys.argv):
+                    try:
+                        min_shared_tags = int(sys.argv[i + 1])
+                    except ValueError:
+                        pass
+                elif arg == "--type" and i + 1 < len(sys.argv):
+                    assoc_type = sys.argv[i + 1]
+                elif arg == "--dry-run":
+                    dry_run = True
+                elif arg == "--unsafe":
+                    safe_mode = False
+            result = kernel_memory_bridge_auto(min_shared_tags, assoc_type, safe_mode, dry_run)
+            print(json.dumps(result, indent=2))
+
+        elif submode == "bridge_candidates":
+            # memory bridge_candidates [--min-shared-tags 1]
+            min_shared_tags = 1
+            for i, arg in enumerate(sys.argv):
+                if arg == "--min-shared-tags" and i + 1 < len(sys.argv):
+                    try:
+                        min_shared_tags = int(sys.argv[i + 1])
+                    except ValueError:
+                        pass
+            result = kernel_memory_bridge_candidates(min_shared_tags)
+            print(json.dumps(result, indent=2))
+        elif submode == "kan":
+            # memory kan <query> [--mode lan|ran|both] [--max-depth 2]
+            if len(sys.argv) < 4:
+                print(json.dumps({"error": "Usage: memory kan <query> [--mode lan|ran|both] [--max-depth 2]"}))
+                return
+            query = sys.argv[3]
+            kan_mode = "both"
+            max_depth = 2
+            for i, arg in enumerate(sys.argv):
+                if arg == "--mode" and i + 1 < len(sys.argv):
+                    kan_mode = sys.argv[i + 1]
+                elif arg == "--max-depth" and i + 1 < len(sys.argv):
+                    try:
+                        max_depth = int(sys.argv[i + 1])
+                    except ValueError:
+                        pass
+            if kan_mode not in ("lan", "ran", "both"):
+                print(json.dumps({"error": f"Invalid mode: {kan_mode}. Use lan, ran, or both."}))
+                return
+            result = kernel_memory_kan(query, kan_mode, max_depth)
+            print(json.dumps(result, indent=2))
         else:
             print(json.dumps({"error": f"Unknown memory submode: {submode}"}))
+
+    elif mode == "xanalyze":
+        root = sys.argv[2] if len(sys.argv) > 2 and not sys.argv[2].startswith("--") else "."
+        output_mode = "summary"
+        auto_store = True
+        analyzers = None
+        for i, arg in enumerate(sys.argv):
+            if arg == "--output" and i + 1 < len(sys.argv):
+                output_mode = sys.argv[i + 1]
+            elif arg == "--no-store":
+                auto_store = False
+            elif arg == "--analyzers" and i + 1 < len(sys.argv):
+                analyzers = sys.argv[i + 1].split(",")
+        result = kernel_xanalyze(root, analyzers, output_mode, auto_store)
+        print(json.dumps(result, indent=2))
+
+    elif mode == "xsteer":
+        root = sys.argv[2] if len(sys.argv) > 2 and not sys.argv[2].startswith("--") else "."
+        output_mode = "full"
+        for i, arg in enumerate(sys.argv):
+            if arg == "--output" and i + 1 < len(sys.argv):
+                output_mode = sys.argv[i + 1]
+        result = kernel_xsteer(root, output_mode)
+        print(json.dumps(result, indent=2))
+
+    elif mode == "xcontext":
+        if len(sys.argv) < 3:
+            print(json.dumps({"error": "Usage: hott_kernel.py xcontext <file_path>"}))
+            return
+        file_path = sys.argv[2]
+        result = kernel_xcontext(file_path)
+        print(json.dumps(result, indent=2))
+
+    elif mode == "fiber":
+        if len(sys.argv) < 3:
+            print(json.dumps({
+                "error": "Usage: hott_kernel.py fiber <init|lift|descend|status|section_start|section_add|section_status|switch|transport|list_archives> [args]"
+            }))
+            return
+        subcommand = sys.argv[2]
+        
+        if subcommand == "transport":
+            # fiber transport <source_fiber_id> <new_task> <new_focus> [--threshold 0.6] [--max 10] [--dry-run]
+            if len(sys.argv) < 6:
+                print(json.dumps({
+                    "error": "Usage: fiber transport <source_fiber_id> <new_task> <new_focus> [--threshold 0.6] [--max 10] [--dry-run]"
+                }))
+                return
+            source_id = sys.argv[3]
+            new_task = sys.argv[4]
+            new_focus = sys.argv[5]
+            threshold = 0.6
+            max_transport = 10
+            dry_run = False
+            i = 6
+            while i < len(sys.argv):
+                if sys.argv[i] == "--threshold" and i + 1 < len(sys.argv):
+                    try:
+                        threshold = float(sys.argv[i + 1])
+                    except ValueError:
+                        pass
+                    i += 2
+                elif sys.argv[i] == "--max" and i + 1 < len(sys.argv):
+                    try:
+                        max_transport = int(sys.argv[i + 1])
+                    except ValueError:
+                        pass
+                    i += 2
+                elif sys.argv[i] == "--dry-run":
+                    dry_run = True
+                    i += 1
+                else:
+                    i += 1
+            result = kernel_fiber_transport(source_id, new_task, new_focus, threshold, max_transport, dry_run)
+            print(json.dumps(result, indent=2))
+        
+        elif subcommand == "list_archives":
+            result = kernel_fiber_list_archives()
+            print(json.dumps(result, indent=2))
+        
+        else:
+            args = sys.argv[3:]
+            result = kernel_fiber(subcommand, args)
+            print(json.dumps(result, indent=2))
 
     else:
         print(json.dumps({"error": f"Unknown mode: {mode}"}))
