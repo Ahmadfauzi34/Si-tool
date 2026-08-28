@@ -16,7 +16,9 @@ Script ini:
 - melakukan assertion minimal
 """
 
+import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -1676,6 +1678,66 @@ def test_f31_memory_topology_betti():
     expect(betti.get("beta_1_structural") == 1, f"{name}: beta_1_structural should be 1 for temporal loop")
 
 
+def _run_kernel(*args):
+    env = dict(os.environ)
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    completed = subprocess.run(
+        [sys.executable, str(ROOT / "hott_kernel.py"), *args],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    expect(
+        completed.returncode == 0,
+        f"KERNEL: {' '.join(args)} gagal: {completed.stderr.strip()}",
+    )
+    try:
+        result = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        expect(False, f"KERNEL: {' '.join(args)} bukan JSON valid: {exc}")
+        return {}
+    expect(
+        not result.get("error"),
+        f"KERNEL: {' '.join(args)} mengembalikan error: {result.get('error')}",
+    )
+    return result
+
+
+def test_kernel_wiring_smoke():
+    """Kunci jalur CLI read-only yang rentan rusak setelah reorganisasi modul."""
+    analyzers = _run_kernel("analyzers").get("available_analyzers", [])
+    expect(len(analyzers) == 12, "KERNEL: semua 12 codebase analyzer harus aktif")
+    expect("topo.circular" in analyzers, "KERNEL: topo.circular harus terdaftar")
+    expect("topo.risk" in analyzers, "KERNEL: topo.risk harus terdaftar")
+
+    project = "fixtures_min/f16_file_brief/project"
+    target = f"{project}/src/app.ts"
+    for command in ("impact", "outline", "brief"):
+        result = _run_kernel(command, target, project)
+        expect(result.get("exists") is True, f"KERNEL: {command} harus menemukan target")
+
+    _run_kernel("steer", project, "--output", "summary")
+
+    for args in (
+        ("memory", "steer", "--output", "summary"),
+        ("memory", "drift"),
+        ("memory", "betti_breakdown"),
+        ("memory", "unconsolidated_tags"),
+        ("memory", "bridge_candidates"),
+        ("fiber", "list_archives"),
+    ):
+        _run_kernel(*args)
+
+    xsteer = _run_kernel("xsteer", project, "--output", "full")
+    memory_archetype = xsteer.get("memory_steering", {}).get("archetype")
+    expect(
+        memory_archetype not in (None, "unknown"),
+        "KERNEL: xsteer harus meneruskan memory_archetype yang terhitung",
+    )
+
+
 def main():
     write_fixtures()
 
@@ -1708,6 +1770,7 @@ def main():
         test_f29_archetype_calibration,
         test_f30_complexity_calibration,
         test_f31_memory_topology_betti,
+        test_kernel_wiring_smoke,
     ]
 
     for test in tests:
@@ -1722,7 +1785,7 @@ def main():
             print(f"- {failure}")
         sys.exit(1)
 
-    print("PASS: 28 fixture minimal baseline aman")
+    print("PASS: 28 fixture minimal + 1 kernel wiring smoke aman")
 
 
 if __name__ == "__main__":

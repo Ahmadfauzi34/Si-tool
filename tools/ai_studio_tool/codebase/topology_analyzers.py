@@ -12,6 +12,7 @@ Migrated dari file_scanner.py:
 Semua fungsi mengonsumsi SharedGraph. Tidak ada os.walk() di sini.
 """
 
+import os
 import re
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -41,6 +42,14 @@ def _strip_comments(content: str) -> str:
     content = re.sub(r"//.*$", "", content, flags=re.MULTILINE)
     content = re.sub(r"/\*[\s\S]*?\*/", "", content)
     return content
+
+
+def _normalize_path(value: str) -> str:
+    """Normalisasi path lokal tanpa bergantung pada legacy shared_graph module."""
+    normalized = os.path.normpath(value).replace("\\", "/")
+    if normalized.startswith("./"):
+        normalized = normalized[2:]
+    return normalized
 
 
 # ============================================================
@@ -229,7 +238,6 @@ def query_impact(shared_graph: Dict[str, Any], target_file: str) -> Dict[str, An
     Analisis dampak perubahan untuk satu file spesifik.
     Migrated dari file_scanner.py get_impacted_files().
     """
-    from shared_graph import _normalize_path
     target = _normalize_path(target_file)
 
     vertices = shared_graph.get("vertices", [])
@@ -355,7 +363,6 @@ def query_outline(shared_graph: Dict[str, Any], target_file: str) -> Dict[str, A
     Ekstrak outline ringkas dari satu file spesifik.
     Migrated dari file_scanner.py get_file_outline().
     """
-    from shared_graph import _normalize_path
     target = _normalize_path(target_file)
 
     file_map = shared_graph.get("file_map", {})

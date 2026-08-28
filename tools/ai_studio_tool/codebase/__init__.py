@@ -21,10 +21,20 @@ from codebase.topology_analyzers import (
     query_outline,
     query_brief,
 )
-from core.analyzer_registry import (
-    analyze_orphan,
-    analyze_entrypoint_impact,
-)
+
+
+def analyze_orphan(shared_graph):
+    """Lazy registry adapter untuk menghindari circular import saat bootstrap."""
+    from core.analyzer_registry import analyze_orphan as _analyze_orphan
+
+    return _analyze_orphan(shared_graph)
+
+
+def analyze_entrypoint_impact(shared_graph):
+    """Lazy registry adapter untuk menghindari circular import saat bootstrap."""
+    from core.analyzer_registry import analyze_entrypoint_impact as _analyze_entrypoint_impact
+
+    return _analyze_entrypoint_impact(shared_graph)
 
 __all__ = [
     "analyze_async_waterfall",
