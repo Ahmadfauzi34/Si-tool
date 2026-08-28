@@ -397,50 +397,55 @@ python3 tools/ai_studio_tool/fixture_check.py
 
 ```
 tools/ai_studio_tool/
-├── hott_kernel.py                  # UNIFIED ENTRY POINT (PRIMARY)
-├── shared_graph.py                 # SharedGraph builder (1-pass scan)
-├── analyzer_registry.py            # 12 codebase analyzer registry
-├── performance_analyzers.py        # perf.* analyzers
-├── hott_analyzers.py               # hott.* analyzers
-├── topology_analyzers.py           # topo.* analyzers + targeted queries
-├── synthesizer.py                  # Codebase synthesis + steering
-├── cross_domain_bridge.py          # Cross-domain integration
-├── deprecation.py                  # Deprecation layer
+|- readme.md
+|- skill.md
+├── hott_kernel.py                   # Unified Kernel CLI & API Entrypoint
+├── tools_schema.json                # JSON Tool Declarations
 │
-├── memory_store.py                 # Memory storage engine
-├── memory_graph.py                 # Memory graph builder
-├── memory_analyzers.py             # Memory analyzers (5) + Betti breakdown
-├── memory_synthesizer.py           # Memory synthesis + steering
-├── memory_fibration.py             # Fibration context management
-├── memory_kan_extension.py         # Kan Extension retrieval (Lan & Ran)
+├── core/                            # Shared Foundation (Layer 0)
+│   ├── shared_graph.py              # Canonical graph representation
+│   ├── analyzer_registry.py         # Registry & lifecycle management
+│   ├── synthesizer.py               # Invariant encoder & decoder steering
+│   ├── safety.py                    # Cycle prevention & Betti validation
+│   ├── deprecation.py               # Standalone deprecation handlers
+│   └── __init__.py                  # Core exports
 │
-├── memory/                         # Memory data storage
-│   ├── memory_store.json           # All memories + associations
-│   ├── fiber_state.json            # Active fiber state
-│   ├── fiber_archive/              # Archived fibers
-│   ├── baseline/
-│   │   └── memory_baseline.json
-│   └── consolidation_log.json
+├── codebase/                        # Codebase Intelligence Domain (Layer 1)
+│   ├── topology_analyzers.py        # Circular deps, risk evaluation
+│   ├── performance_analyzers.py     # Async waterfall, deopt, GC, cache
+│   ├── hott_analyzers.py            # Isomorphism, sheaf, homotopy, manifold
+│   ├── targeted_queries.py          # Impact, outline, and brief queries
+│   └── __init__.py                  # Codebase domain exports
 │
-├── baseline/                       # Codebase baseline
-│   └── kernel_baseline.json
+├── memory/                          # Topological Memory Domain (Layer 2)
+│   ├── store.py                     # CRUD, associations, retrieval
+│   ├── graph.py                     # Memory graph & adjacency builder
+│   ├── analyzers.py                 # Memory fragmentation, hub, manifold, Betti
+│   ├── betti.py                     # Edge-type-aware Betti breakdown
+│   ├── consolidation.py             # Memory colimit & tag consolidation
+│   ├── compact.py                   # Quotient forgetting & archiving
+│   ├── bridge.py                    # Semantic bridging & homotopy extension
+│   ├── synthesizer.py               # Memory steering, fingerprint, drift
+│   ├── kan_extension.py             # Left (Lan) & Right (Ran) completions
+│   └── __init__.py                  # Memory domain exports
 │
-├── fixture_check.py                # Baseline fixtures (28 tests)
-├── tools_schema.json               # AI Agent tool declarations
-├── SKILL.md                        # This file
+├── context/                         # Fibration Context Window Domain (Layer 3)
+│   ├── fibration.py                 # Fiber state lifecycle (init, lift, descend)
+│   ├── section.py                   # Narrative section continuity
+│   ├── transport.py                 # Parallel transport & decay factor
+│   ├── compatibility.py             # Fiber-memory compatibility check
+│   └── __init__.py                  # Context domain exports
 │
-├── file_scanner.py                 # [LEGACY] → hott_kernel analyze/impact/outline/brief
-├── async_waterfall_detector.py     # [LEGACY] → perf.async
-├── deopt_checker.py                # [LEGACY] → perf.deopt
-├── gc_pressure_analyzer.py         # [LEGACY] → perf.gc
-├── cache_auditor.py                # [LEGACY] → perf.cache
-├── type_isomorphism_observer.py    # [LEGACY] → hott.isomorphism
-├── boundary_sheaf_checker.py       # [LEGACY] → hott.sheaf
-├── homotopy_path_observer.py       # [LEGACY] → hott.homotopy
-├── topological_manifold_builder.py # [LEGACY] → hott.manifold
-├── topological_integrity_orchestrator.py # [LEGACY] → hott_kernel synthesize
-├── invariant_encoder.py            # [LEGACY] → hott_kernel synthesize
-└── decoder_steering.py             # [LEGACY] → hott_kernel steer/establish
+├── bridge/                          # Cross-Domain Integration (Layer 4)
+│   ├── xanalyze.py                  # Selective auto-store from code findings
+│   ├── xsteer.py                    # Unified cross-domain steering
+│   ├── xcontext.py                  # Memory-augmented file context
+│   └── __init__.py                  # Bridge domain exports
+│
+├── data/                            # Persistent Storage & State
+│   ├── memory/                      # Memory stores & baseline files
+│   └── fiber/                       # Active fiber state & fiber archives
+│
 ```
 
 ---
