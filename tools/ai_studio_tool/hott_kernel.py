@@ -34,6 +34,18 @@ except ImportError:
         SHARED_GRAPH_AVAILABLE = False
 
 try:
+    from core.graph_cache import (
+        CACHE_MODES,
+        build_cached_shared_graph,
+        clear_graph_cache,
+        get_graph_cache_status,
+    )
+    GRAPH_CACHE_AVAILABLE = True
+except ImportError:
+    CACHE_MODES = ("auto", "refresh", "off")
+    GRAPH_CACHE_AVAILABLE = False
+
+try:
     from core.analyzer_registry import run_analyzers, get_available_analyzers
     REGISTRY_AVAILABLE = True
 except ImportError:
@@ -196,6 +208,10 @@ except ImportError:
 
 
 CODEBASE_SCHEMA_VERSION = "3.0.0-kernel"
+_ACTIVE_GRAPH_CACHE_MODE = os.environ.get(
+    "AI_STUDIO_GRAPH_CACHE",
+    "auto",
+).strip().lower()
 
 
 def _utc_timestamp() -> str:
@@ -241,6 +257,85 @@ def _validate_output_mode(
         output_mode=output_mode,
         supported_output_modes=list(allowed),
     )
+
+
+def _set_graph_cache_mode(mode: str) -> Optional[Dict[str, Any]]:
+    """Validate and activate one cache policy for this kernel process."""
+    global _ACTIVE_GRAPH_CACHE_MODE
+    normalized = str(mode).strip().lower()
+    if normalized not in CACHE_MODES:
+        return _kernel_error(
+            "invalid_graph_cache_mode",
+            f"Invalid graph cache mode: {mode}",
+            cache_mode=mode,
+            supported_cache_modes=list(CACHE_MODES),
+        )
+    _ACTIVE_GRAPH_CACHE_MODE = normalized
+    return None
+
+
+def _build_kernel_graph(scan_root: str) -> Dict[str, Any]:
+    """Build the canonical graph using the active cross-invocation cache policy."""
+    if GRAPH_CACHE_AVAILABLE:
+        return build_cached_shared_graph(
+            scan_root,
+            mode=_ACTIVE_GRAPH_CACHE_MODE,
+        )
+    graph = build_shared_graph(scan_root)
+    graph["cache"] = {
+        "mode": "off",
+        "status": "unavailable",
+        "files_discovered": graph.get("summary", {}).get("total_files", 0),
+        "files_reused": 0,
+        "files_read": graph.get("summary", {}).get("total_files", 0),
+        "hit_ratio": 0.0,
+    }
+    return graph
+
+
+def kernel_cache(action: str, scan_root: str = ".") -> Dict[str, Any]:
+    """Inspect, refresh, or clear the persistent SharedGraph snapshot."""
+    if not GRAPH_CACHE_AVAILABLE:
+        return _kernel_error(
+            "graph_cache_unavailable",
+            "persistent graph cache module is not available",
+        )
+    if action not in ("status", "refresh", "clear"):
+        return _kernel_error(
+            "invalid_cache_action",
+            f"Invalid cache action: {action}",
+            action=action,
+            supported_actions=["status", "refresh", "clear"],
+        )
+    if action != "clear":
+        root_error = _validate_scan_root(scan_root)
+        if root_error:
+            return root_error
+    if action == "status":
+        cache_result = get_graph_cache_status(scan_root)
+    elif action == "clear":
+        cache_result = clear_graph_cache(scan_root)
+        if cache_result.get("status") == "clear_failed":
+            return _kernel_error(
+                "graph_cache_clear_failed",
+                "persistent graph cache entry could not be removed",
+                scan_root=scan_root,
+                cache=cache_result,
+            )
+    else:
+        graph = build_cached_shared_graph(scan_root, mode="refresh")
+        cache_result = graph.get("cache", {})
+        cache_result = {
+            **cache_result,
+            "graph_summary": graph.get("summary", {}),
+        }
+    return {
+        "schema_version": CODEBASE_SCHEMA_VERSION,
+        "mode": "cache",
+        "action": action,
+        "scan_root": scan_root,
+        "cache": cache_result,
+    }
 
 
 def _analysis_status(total_files: int, analyzers_failed: int = 0) -> Dict[str, Any]:
@@ -884,7 +979,7 @@ def kernel_xanalyze(
         return {"error": "required modules not available"}
 
     # Step 1: Build graph + run analyzers
-    graph = build_shared_graph(scan_root)
+    graph = _build_kernel_graph(scan_root)
     analyzer_output = run_analyzers(graph, analyzer_names)
     analyzer_results = analyzer_output.get("results", {})
 
@@ -894,7 +989,7 @@ def kernel_xanalyze(
     correlations = _detect_cross_analyzer_correlations(graph, analyzer_output)
     fingerprint = {}
     if ENCODER_AVAILABLE:
-        enc_res = encode_topological_invariants(scan_root)
+        enc_res = encode_topological_invariants(scan_root, shared_graph=graph)
         if enc_res.get("available"):
             fingerprint = enc_res.get("topological_fingerprint", {})
     if not fingerprint and "hott.manifold" in analyzer_results:
@@ -935,6 +1030,7 @@ def kernel_xanalyze(
             "schema_version": "4.0.0-memory",
             "mode": "xanalyze",
             "scan_root": scan_root,
+            "graph_cache": graph.get("cache", {}),
             "analysis_summary": {
                 "total_findings": total_findings,
                 "findings_by_severity": severity_counts,
@@ -953,6 +1049,7 @@ def kernel_xanalyze(
         "schema_version": "4.0.0-memory",
         "mode": "xanalyze",
         "scan_root": scan_root,
+        "graph_cache": graph.get("cache", {}),
         "analyzers": analyzer_output,
         "synthesis": {
             "fingerprint": fingerprint,
@@ -969,12 +1066,17 @@ def kernel_xsteer(scan_root: str = ".", output_mode: str = "full") -> Dict[str, 
     if not CROSS_DOMAIN_AVAILABLE:
         return {"error": "cross_domain_bridge not available"}
 
-    result = cross_domain_steer(scan_root)
+    root_error = _validate_scan_root(scan_root)
+    if root_error:
+        return root_error
+    graph = _build_kernel_graph(scan_root)
+    result = cross_domain_steer(scan_root, shared_graph=graph)
 
     if output_mode == "summary":
         return {
             "schema_version": "4.0.0-memory",
             "mode": "xsteer",
+            "graph_cache": graph.get("cache", {}),
             "codebase": result.get("codebase_steering", {}),
             "memory": result.get("memory_steering", {}),
             "consolidation_candidate": result.get("consolidation_signal", {}).get("consolidation_candidate", False),
@@ -1164,7 +1266,7 @@ def kernel_analyze(
         return output_error
 
     # Step 1: Build SharedGraph (1x scan, 1x graph build)
-    shared_graph = build_shared_graph(scan_root)
+    shared_graph = _build_kernel_graph(scan_root)
 
     # Mode graph: langsung return tanpa jalankan analyzers
     if output_mode == "graph":
@@ -1173,6 +1275,7 @@ def kernel_analyze(
             "schema_version": "3.0.0-kernel",
             "mode": "graph",
             "scan_root": scan_root,
+            "graph_cache": shared_graph.get("cache", {}),
             "shared_graph": graph_output,
         }
 
@@ -1210,6 +1313,7 @@ def kernel_analyze(
         "output_mode": output_mode,
         "scan_root": scan_root,
         "timestamp": _utc_timestamp(),
+        "graph_cache": shared_graph.get("cache", {}),
     }
 
     # Step 4: Filter output berdasarkan mode
@@ -1257,13 +1361,14 @@ def kernel_impact(
     if output_error:
         return output_error
 
-    graph = build_shared_graph(scan_root)
+    graph = _build_kernel_graph(scan_root)
     result = query_impact(graph, target_file)
 
     if output_mode == "summary":
         return {
             "schema_version": "3.0.0-kernel",
             "mode": "impact",
+            "graph_cache": graph.get("cache", {}),
             "target": result.get("target"),
             "exists": result.get("exists"),
             "change_risk_level": result.get("change_risk_level"),
@@ -1276,6 +1381,7 @@ def kernel_impact(
     return {
         "schema_version": "3.0.0-kernel",
         "mode": "impact",
+        "graph_cache": graph.get("cache", {}),
         **result,
     }
 
@@ -1292,12 +1398,13 @@ def kernel_outline(
     if root_error:
         return root_error
 
-    graph = build_shared_graph(scan_root)
+    graph = _build_kernel_graph(scan_root)
     result = query_outline(graph, target_file)
 
     return {
         "schema_version": "3.0.0-kernel",
         "mode": "outline",
+        "graph_cache": graph.get("cache", {}),
         **result,
     }
 
@@ -1318,7 +1425,7 @@ def kernel_brief(
     if output_error:
         return output_error
 
-    graph = build_shared_graph(scan_root)
+    graph = _build_kernel_graph(scan_root)
     result = query_brief(graph, target_file)
 
     if output_mode == "summary":
@@ -1327,6 +1434,7 @@ def kernel_brief(
         return {
             "schema_version": "3.0.0-kernel",
             "mode": "brief",
+            "graph_cache": graph.get("cache", {}),
             "file": result.get("file"),
             "exists": result.get("exists"),
             "export_count": outline_data.get("stats", {}).get("export_count", 0),
@@ -1339,6 +1447,7 @@ def kernel_brief(
     return {
         "schema_version": "3.0.0-kernel",
         "mode": "brief",
+        "graph_cache": graph.get("cache", {}),
         **result,
     }
 
@@ -1398,7 +1507,7 @@ def kernel_context(
         )
 
     # One canonical scan; all analyzers and the optimizer reuse this snapshot.
-    graph = build_shared_graph(scan_root)
+    graph = _build_kernel_graph(scan_root)
     analyzer_output = run_analyzers(graph)
     pack = build_context_pack(
         graph,
@@ -1424,6 +1533,7 @@ def kernel_context(
         "output_mode": output_mode,
         "scan_root": scan_root,
         "query": query,
+        "graph_cache": graph.get("cache", {}),
     }
     if output_mode == "prompt":
         selection = pack.get("selection", {})
@@ -1472,9 +1582,15 @@ def kernel_establish(
     root_error = _validate_scan_root(scan_root)
     if root_error:
         return root_error
-    result = establish_baseline(scan_root, baseline_path)
+    graph = _build_kernel_graph(scan_root)
+    result = establish_baseline(
+        scan_root,
+        baseline_path,
+        shared_graph=graph,
+    )
     return {
         "schema_version": "3.0.0-kernel",
+        "graph_cache": graph.get("cache", {}),
         **result,
     }
 
@@ -1606,7 +1722,7 @@ def kernel_synthesize(
         return output_error
 
     # Step 1: Build SharedGraph (1x scan)
-    graph = build_shared_graph(scan_root)
+    graph = _build_kernel_graph(scan_root)
 
     # Step 2: Run ALL 13 analyzers
     analyzer_output = run_analyzers(graph, analyzer_names)
@@ -1615,7 +1731,7 @@ def kernel_synthesize(
     # Step 3: Fingerprint via invariant_encoder
     fingerprint = None
     if ENCODER_AVAILABLE:
-        enc_res = encode_topological_invariants(scan_root)
+        enc_res = encode_topological_invariants(scan_root, shared_graph=graph)
         if enc_res.get("available"):
             fingerprint = enc_res.get("topological_fingerprint")
 
@@ -1658,6 +1774,7 @@ def kernel_synthesize(
             "schema_version": "3.0.0-kernel",
             "mode": "synthesize",
             "scan_root": scan_root,
+            "graph_cache": graph.get("cache", {}),
             "fingerprint": fingerprint,
             "topological_health_score": health_score,
             "correlations": correlations,
@@ -1668,6 +1785,7 @@ def kernel_synthesize(
             "schema_version": "3.0.0-kernel",
             "mode": "synthesize",
             "scan_root": scan_root,
+            "graph_cache": graph.get("cache", {}),
             "fingerprint": fingerprint,
             "topological_health_score": health_score,
             "correlations": correlations,
@@ -1680,6 +1798,7 @@ def kernel_synthesize(
             "schema_version": "3.0.0-kernel",
             "mode": "synthesize",
             "scan_root": scan_root,
+            "graph_cache": graph.get("cache", {}),
             "shared_graph": graph_output,
             "fingerprint": fingerprint,
             "topological_health_score": health_score,
@@ -1705,13 +1824,19 @@ def kernel_steer(
     if output_error:
         return output_error
 
-    result = steer_decoder(scan_root, baseline_path)
+    graph = _build_kernel_graph(scan_root)
+    result = steer_decoder(
+        scan_root,
+        baseline_path,
+        shared_graph=graph,
+    )
 
     if output_mode == "summary":
         return {
             "schema_version": "3.0.0-kernel",
             "mode": "steer",
             "scan_root": scan_root,
+            "graph_cache": graph.get("cache", {}),
             "baseline": result.get("baseline"),
             "summary": result.get("summary"),
             "steering_signals": result.get("steering_signals"),
@@ -1723,6 +1848,7 @@ def kernel_steer(
     return {
         "schema_version": "3.0.0-kernel",
         "mode": "steer",
+        "graph_cache": graph.get("cache", {}),
         **result,
     }
 
@@ -1732,9 +1858,13 @@ def main():
         print(json.dumps({
             "tool": "hott_kernel",
             "schema_version": "4.0.0-kernel",
+            "global_options": {
+                "cache_mode": "--cache-mode auto|refresh|off (or AI_STUDIO_GRAPH_CACHE)",
+            },
             "usage": {
                 "analyze": "python3 hott_kernel.py analyze [root] [--analyzers a,b] [--output full|summary|findings|graph]",
                 "analyzers": "python3 hott_kernel.py analyzers",
+                "cache": "python3 hott_kernel.py cache status|refresh|clear [root]",
                 "impact": "python3 hott_kernel.py impact <file> [root] [--output full|summary]",
                 "outline": "python3 hott_kernel.py outline <file> [root]",
                 "brief": "python3 hott_kernel.py brief <file> [root] [--output full|summary]",
@@ -1773,6 +1903,20 @@ def main():
         }, indent=2))
         return
 
+    requested_cache_mode = _ACTIVE_GRAPH_CACHE_MODE
+    for index, argument in enumerate(sys.argv):
+        if argument == "--cache-mode":
+            if index + 1 >= len(sys.argv):
+                _emit_cli_result(_kernel_error(
+                    "missing_graph_cache_mode",
+                    "--cache-mode requires auto, refresh, or off.",
+                    supported_cache_modes=list(CACHE_MODES),
+                ))
+            requested_cache_mode = sys.argv[index + 1]
+    cache_mode_error = _set_graph_cache_mode(requested_cache_mode)
+    if cache_mode_error:
+        _emit_cli_result(cache_mode_error)
+
     mode = sys.argv[1]
 
     if mode == "analyze":
@@ -1809,6 +1953,21 @@ def main():
                 "registry_unavailable",
                 "registry not available",
             ))
+
+    elif mode == "cache":
+        if len(sys.argv) < 3 or sys.argv[2].startswith("--"):
+            _emit_cli_result(_kernel_error(
+                "missing_cache_action",
+                "Usage: hott_kernel.py cache status|refresh|clear [root]",
+                supported_actions=["status", "refresh", "clear"],
+            ))
+        action = sys.argv[2]
+        root = (
+            sys.argv[3]
+            if len(sys.argv) > 3 and not sys.argv[3].startswith("--")
+            else "."
+        )
+        _emit_cli_result(kernel_cache(action, root))
 
     elif mode == "impact":
         if len(sys.argv) < 3:

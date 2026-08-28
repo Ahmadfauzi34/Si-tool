@@ -642,6 +642,7 @@ def build_context_pack(
         "provenance": {
             "graph_content_signature": signature,
             "scan_root": shared_graph.get("scan_root"),
+            "graph_cache": shared_graph.get("cache", {}),
             "shared_graph_scan_passes": 1,
             "optimizer_additional_filesystem_scans": 0,
             "analyzers_share_same_graph": True,

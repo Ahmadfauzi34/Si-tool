@@ -18,8 +18,10 @@ Script ini:
 
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -545,6 +547,17 @@ FIXTURES = {
     ),
     Path("fixtures_min/f34_context_optimizer/project/src/auth/auth.service.ts"): (
         "export const authenticate = () => true;\n"
+    ),
+    # F35 persistent SharedGraph cache and file-level invalidation
+    Path("fixtures_min/f35_incremental_cache/project/src/a.ts"): (
+        "import './b';\n"
+        "export const a = true;\n"
+    ),
+    Path("fixtures_min/f35_incremental_cache/project/src/b.ts"): (
+        "export const b = true;\n"
+    ),
+    Path("fixtures_min/f35_incremental_cache/project/src/c.ts"): (
+        "export const c = true;\n"
     ),
 }
 
@@ -1898,6 +1911,126 @@ def test_f34_context_optimizer():
     )
 
 
+def test_f35_incremental_graph_cache():
+    name = "F35"
+    source_project = ROOT / "fixtures_min/f35_incremental_cache/project/src"
+
+    from core.graph_cache import (
+        build_cached_shared_graph,
+        clear_graph_cache,
+        get_graph_cache_status,
+    )
+
+    with tempfile.TemporaryDirectory() as temporary_root:
+        project = Path(temporary_root) / "project"
+        cache_dir = Path(temporary_root) / "cache"
+        shutil.copytree(source_project, project)
+
+        first = build_cached_shared_graph(str(project), cache_dir=str(cache_dir))
+        first_cache = first.get("cache", {})
+        expect(first_cache.get("status") == "miss", f"{name}: build awal harus miss")
+        expect(first_cache.get("files_read") == 3, f"{name}: build awal harus baca 3 file")
+        expect(first_cache.get("files_added") == 3, f"{name}: build awal harus catat 3 file baru")
+        expect(first_cache.get("contains_source_content") is True, f"{name}: disclosure source wajib")
+
+        second = build_cached_shared_graph(str(project), cache_dir=str(cache_dir))
+        second_cache = second.get("cache", {})
+        expect(second_cache.get("status") == "hit", f"{name}: build kedua harus hit")
+        expect(second_cache.get("files_reused") == 3, f"{name}: 3 file harus dipakai ulang")
+        expect(second_cache.get("files_read") == 0, f"{name}: cache hit tidak boleh baca source")
+        for key in (
+            "vertices",
+            "edges",
+            "node_metadata",
+            "resolved_imports",
+            "unresolved_imports",
+            "external_imports",
+            "boundaries",
+            "file_to_boundary",
+            "type_shapes",
+            "summary",
+        ):
+            expect(first.get(key) == second.get(key), f"{name}: cache hit mengubah {key}")
+
+        b_path = project / "b.ts"
+        b_path.write_text(
+            "import './c';\nexport const b = true;\n",
+            encoding="utf-8",
+        )
+        changed = build_cached_shared_graph(str(project), cache_dir=str(cache_dir))
+        changed_cache = changed.get("cache", {})
+        expect(changed_cache.get("status") == "partial", f"{name}: mutation harus partial")
+        expect(changed_cache.get("files_changed") == 1, f"{name}: hanya b.ts berubah")
+        expect(changed_cache.get("files_read") == 1, f"{name}: hanya b.ts dibaca ulang")
+        expect(changed_cache.get("files_reused") == 2, f"{name}: dua file harus reuse")
+        expect(changed.get("summary", {}).get("total_edges") == 2, f"{name}: edge baru harus terbentuk")
+
+        extra_path = project / "extra.ts"
+        extra_path.write_text("export const extra = true;\n", encoding="utf-8")
+        added = build_cached_shared_graph(str(project), cache_dir=str(cache_dir))
+        added_cache = added.get("cache", {})
+        expect(added_cache.get("files_added") == 1, f"{name}: extra.ts harus terdeteksi")
+        expect(added_cache.get("files_read") == 1, f"{name}: hanya extra.ts dibaca")
+        expect(added_cache.get("files_reused") == 3, f"{name}: tiga file harus reuse")
+
+        (project / "c.ts").unlink()
+        deleted = build_cached_shared_graph(str(project), cache_dir=str(cache_dir))
+        deleted_cache = deleted.get("cache", {})
+        expect(deleted_cache.get("files_deleted") == 1, f"{name}: delete harus terdeteksi")
+        expect(deleted_cache.get("files_read") == 0, f"{name}: delete tak perlu baca source")
+        expect(deleted_cache.get("files_reused") == 3, f"{name}: file tersisa harus reuse")
+        expect(deleted.get("summary", {}).get("total_unresolved") == 1, f"{name}: import c jadi unresolved")
+
+        status = get_graph_cache_status(str(project), cache_dir=str(cache_dir))
+        expect(status.get("status") == "valid", f"{name}: cache pascahapus harus valid")
+        expect(status.get("files_reusable") == 3, f"{name}: status harus lapor 3 reusable")
+
+        refreshed = build_cached_shared_graph(
+            str(project),
+            cache_dir=str(cache_dir),
+            mode="refresh",
+        )
+        refresh_cache = refreshed.get("cache", {})
+        expect(refresh_cache.get("status") == "refreshed", f"{name}: refresh harus eksplisit")
+        expect(refresh_cache.get("files_read") == 3, f"{name}: refresh harus baca semua file")
+
+        cache_path = Path(refresh_cache.get("cache_path", ""))
+        cache_path.write_text("{cache-rusak", encoding="utf-8")
+        recovered = build_cached_shared_graph(str(project), cache_dir=str(cache_dir))
+        recovered_cache = recovered.get("cache", {})
+        expect(recovered_cache.get("status") == "recovered", f"{name}: corrupt harus recovery")
+        expect(recovered_cache.get("files_read") == 3, f"{name}: recovery harus rebuild")
+        expect(
+            str(recovered_cache.get("recovery_reason", "")).startswith("cache_read_error:"),
+            f"{name}: alasan recovery harus transparan",
+        )
+
+        cleared = clear_graph_cache(str(project), cache_dir=str(cache_dir))
+        expect(cleared.get("status") == "cleared", f"{name}: clear harus menghapus entry")
+        missing = get_graph_cache_status(str(project), cache_dir=str(cache_dir))
+        expect(missing.get("status") == "missing", f"{name}: status setelah clear harus missing")
+
+        disabled = build_cached_shared_graph(
+            str(project),
+            cache_dir=str(cache_dir),
+            mode="off",
+        )
+        expect(disabled.get("cache", {}).get("status") == "disabled", f"{name}: mode off harus bypass")
+
+        write_failed = build_cached_shared_graph(
+            str(project),
+            cache_dir=str(project / "a.ts"),
+        )
+        expect(
+            write_failed.get("cache", {}).get("status") == "write_failed",
+            f"{name}: cache path tak dapat ditulis tidak boleh menggagalkan graph",
+        )
+        expect(
+            write_failed.get("summary", {}).get("total_files") == 3,
+            f"{name}: write failure tetap harus menghasilkan graph lengkap",
+        )
+
+
 def test_f31_memory_topology_betti():
     name = "F31"
     from memory.graph import build_memory_graph_from_data
@@ -1974,6 +2107,7 @@ def test_kernel_wiring_smoke():
         result = _run_kernel(command, target, project)
         expect(result.get("exists") is True, f"KERNEL: {command} harus menemukan target")
 
+    _run_kernel("cache", "clear", project)
     context_result = _run_kernel(
         "context",
         "app dependency change",
@@ -1994,6 +2128,31 @@ def test_kernel_wiring_smoke():
         context_result.get("budget", {}).get("within_budget") is True,
         "KERNEL: context CLI harus mematuhi budget",
     )
+    first_cache = context_result.get("graph_cache", {})
+    expect(first_cache.get("status") == "miss", "KERNEL: context awal harus cache miss")
+    expect(first_cache.get("files_read") == 3, "KERNEL: context awal harus baca 3 source")
+
+    repeated_context = _run_kernel(
+        "context",
+        "app dependency change",
+        project,
+        "--target",
+        target,
+        "--budget-tokens",
+        "400",
+        "--output",
+        "prompt",
+    )
+    repeated_cache = repeated_context.get("graph_cache", {})
+    expect(repeated_cache.get("status") == "hit", "KERNEL: context kedua harus cache hit")
+    expect(repeated_cache.get("files_reused") == 3, "KERNEL: context kedua harus reuse 3 source")
+    expect(repeated_cache.get("files_read") == 0, "KERNEL: context kedua tidak boleh baca source")
+    expect(
+        context_result.get("context_block") == repeated_context.get("context_block"),
+        "KERNEL: cache tidak boleh mengubah context block",
+    )
+    cache_status = _run_kernel("cache", "status", project).get("cache", {})
+    expect(cache_status.get("status") == "valid", "KERNEL: cache status harus valid")
 
     _run_kernel("steer", project, "--output", "summary")
 
@@ -2013,6 +2172,7 @@ def test_kernel_wiring_smoke():
         memory_archetype not in (None, "unknown"),
         "KERNEL: xsteer harus meneruskan memory_archetype yang terhitung",
     )
+    _run_kernel("cache", "clear", project)
 
 
 def test_kernel_cli_contract():
@@ -2041,6 +2201,11 @@ def test_kernel_cli_contract():
     expect(not help_payload.get("error"), "CLI: --help tidak boleh menjadi error")
     expect("analyze" in help_payload.get("usage", {}), "CLI: help harus memuat analyze")
     expect("context" in help_payload.get("usage", {}), "CLI: help harus memuat context")
+    expect("cache" in help_payload.get("usage", {}), "CLI: help harus memuat cache")
+    expect(
+        "cache_mode" in help_payload.get("global_options", {}),
+        "CLI: help harus memuat cache mode global",
+    )
 
     project = "fixtures_min/f16_file_brief/project"
     completed, invalid_analyzer = run_raw(
@@ -2072,6 +2237,41 @@ def test_kernel_cli_contract():
     expect(
         invalid_output.get("error_code") == "invalid_output_mode",
         "CLI: output mode invalid harus ditolak eksplisit",
+    )
+
+    completed, invalid_cache_mode = run_raw(
+        "analyze",
+        project,
+        "--output",
+        "summary",
+        "--cache-mode",
+        "bukan-mode",
+    )
+    expect(completed.returncode == 2, "CLI: cache mode invalid harus memakai exit code 2")
+    expect(
+        invalid_cache_mode.get("error_code") == "invalid_graph_cache_mode",
+        "CLI: cache mode invalid harus punya error code stabil",
+    )
+
+    completed, invalid_cache_action = run_raw("cache", "bukan-aksi", project)
+    expect(completed.returncode == 2, "CLI: cache action invalid harus memakai exit code 2")
+    expect(
+        invalid_cache_action.get("error_code") == "invalid_cache_action",
+        "CLI: cache action invalid harus punya error code stabil",
+    )
+
+    completed, cache_off = run_raw(
+        "analyze",
+        project,
+        "--output",
+        "summary",
+        "--cache-mode",
+        "off",
+    )
+    expect(completed.returncode == 0, "CLI: cache mode off harus tetap sukses")
+    expect(
+        cache_off.get("graph_cache", {}).get("status") == "disabled",
+        "CLI: mode off harus terlihat dalam provenance",
     )
 
     completed, invalid_budget = run_raw(
@@ -2113,6 +2313,8 @@ def test_kernel_cli_contract():
         "DeprecationWarning" not in completed.stderr,
         "CLI: analisis tidak boleh menghasilkan warning datetime deprecated",
     )
+    run_raw("cache", "clear", project)
+    run_raw("cache", "clear", ".")
 
 
 def main():
@@ -2150,6 +2352,7 @@ def main():
         test_f32_reciprocal_cycle_basis,
         test_f33_static_test_reachability,
         test_f34_context_optimizer,
+        test_f35_incremental_graph_cache,
         test_kernel_wiring_smoke,
         test_kernel_cli_contract,
     ]
@@ -2166,7 +2369,7 @@ def main():
             print(f"- {failure}")
         sys.exit(1)
 
-    print("PASS: 31 fixture minimal + 2 portable integration smoke aman")
+    print("PASS: 32 fixture minimal + 2 portable integration smoke aman")
 
 
 if __name__ == "__main__":

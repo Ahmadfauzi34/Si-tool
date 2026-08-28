@@ -4,8 +4,15 @@ Core Domain — Shared Infrastructure, Registry, Synthesizer & Safety
 
 from core.shared_graph import (
     build_shared_graph,
+    discover_source_files,
     DEFAULT_IGNORE_DIRS,
     SOURCE_EXTENSIONS,
+)
+from core.graph_cache import (
+    CACHE_MODES,
+    build_cached_shared_graph,
+    clear_graph_cache,
+    get_graph_cache_status,
 )
 from core.analyzer_registry import (
     ANALYZER_REGISTRY,
@@ -33,8 +40,13 @@ from core.deprecation import (
 
 __all__ = [
     "build_shared_graph",
+    "discover_source_files",
     "DEFAULT_IGNORE_DIRS",
     "SOURCE_EXTENSIONS",
+    "CACHE_MODES",
+    "build_cached_shared_graph",
+    "clear_graph_cache",
+    "get_graph_cache_status",
     "ANALYZER_REGISTRY",
     "register_analyzer",
     "run_analyzers",

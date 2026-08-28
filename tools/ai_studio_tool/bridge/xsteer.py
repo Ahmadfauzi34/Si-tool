@@ -8,7 +8,10 @@ from typing import Any, Dict, List, Optional
 SCHEMA_VERSION = "4.0.0-memory"
 
 
-def cross_domain_steer(scan_root: str = "src") -> Dict[str, Any]:
+def cross_domain_steer(
+    scan_root: str = "src",
+    shared_graph: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     """Gabungkan codebase steering + memory steering menjadi unified signal."""
     result = {
         "schema_version": SCHEMA_VERSION,
@@ -30,13 +33,16 @@ def cross_domain_steer(scan_root: str = "src") -> Dict[str, Any]:
             result["codebase_steering"] = {"error": "codebase modules not available"}
             return result
 
-    codebase_res = steer_decoder(scan_root)
+    if shared_graph is None:
+        codebase_res = steer_decoder(scan_root)
+    else:
+        codebase_res = steer_decoder(scan_root, shared_graph=shared_graph)
     codebase_signals = codebase_res.get("steering_signals", {})
     codebase_drift = codebase_res.get("drift_analysis") or {}
     codebase_fingerprint = codebase_res.get("current_fingerprint") or codebase_res.get("fingerprint", {})
 
     try:
-        cg = build_shared_graph(scan_root)
+        cg = shared_graph if shared_graph is not None else build_shared_graph(scan_root)
         c_output = run_analyzers(cg, None)
         c_total_files = cg.get("summary", {}).get("total_files", 0)
         c_weights = {"high": 3, "medium": 2, "low": 1, "info": 0}
@@ -57,6 +63,8 @@ def cross_domain_steer(scan_root: str = "src") -> Dict[str, Any]:
         "budget": codebase_signals.get("reasoning_budget", "medium"),
         "drift": codebase_drift.get("interpretation", "no_baseline") if codebase_drift else "no_baseline",
     }
+    if shared_graph is not None:
+        result["graph_cache"] = shared_graph.get("cache", {})
 
     # Memory Steering
     try:

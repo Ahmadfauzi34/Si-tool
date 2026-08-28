@@ -2,7 +2,7 @@
 SharedGraph Builder — HoTT Kernel Foundation
 Schema Version: 3.0.0-kernel
 
-Membangun SharedGraph dalam SATU pass:
+Membangun SharedGraph dalam SATU discovery pass:
 - Filesystem scan (1x, sebelumnya 9x)
 - Import parsing (1x, sebelumnya 5x)
 - Graph construction (1x, sebelumnya 4x)
@@ -10,8 +10,9 @@ Membangun SharedGraph dalam SATU pass:
 - Boundary detection (1x)
 - Type shape extraction (1x)
 
-SharedGraph kemudian di-share ke semua analyzer.
-Tidak ada analyzer yang boleh scan filesystem sendiri.
+SharedGraph kemudian di-share ke semua analyzer. Cache layer boleh memakai
+discovery manifest dan memasok snapshot file yang tervalidasi; analyzer tetap
+tidak boleh scan filesystem sendiri.
 """
 
 import os
@@ -216,15 +217,47 @@ def _detect_boundaries(
     return boundaries, file_to_boundary
 
 
+def discover_source_files(
+    scan_root: str = ".",
+    ignore_dirs: Optional[Set[str]] = None,
+) -> Dict[str, Dict[str, int]]:
+    """Discover supported source files and cheap stat fingerprints once."""
+    ignored = set(DEFAULT_IGNORE_DIRS if ignore_dirs is None else ignore_dirs)
+    discovered: Dict[str, Dict[str, int]] = {}
+    for root, dirs, files in os.walk(scan_root):
+        dirs[:] = sorted(
+            [
+                directory
+                for directory in dirs
+                if directory not in ignored and not directory.startswith(".")
+            ]
+        )
+        for filename in sorted(files):
+            if not _is_source_file(filename):
+                continue
+            full_path = _normalize_path(os.path.join(root, filename))
+            try:
+                stat = os.stat(full_path)
+            except OSError:
+                continue
+            discovered[full_path] = {
+                "size": int(stat.st_size),
+                "mtime_ns": int(stat.st_mtime_ns),
+                "ctime_ns": int(stat.st_ctime_ns),
+            }
+    return dict(sorted(discovered.items()))
+
+
 def build_shared_graph(
     scan_root: str = ".",
     ignore_dirs: Optional[Set[str]] = None,
+    _file_snapshot: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """
-    Bangun SharedGraph dalam SATU pass.
+    Bangun SharedGraph dari satu discovery pass atau snapshot tervalidasi.
 
-    Ini adalah satu-satunya fungsi yang boleh melakukan os.walk().
-    Semua analyzer mengonsumsi output fungsi ini.
+    Discovery filesystem tetap terpusat di modul ini. Semua analyzer
+    mengonsumsi output fungsi ini dan tidak melakukan scan sendiri.
     """
     if ignore_dirs is None:
         ignore_dirs = set(DEFAULT_IGNORE_DIRS)
@@ -238,15 +271,8 @@ def build_shared_graph(
     file_map: Dict[str, str] = {}           # path -> content
     file_imports: Dict[str, List[str]] = {}  # path -> raw import paths
 
-    for root, dirs, files in os.walk(scan_root):
-        dirs[:] = sorted(
-            [d for d in dirs if d not in ignore_dirs and not d.startswith(".")]
-        )
-        for f in sorted(files):
-            if not _is_source_file(f):
-                continue
-
-            full_path = _normalize_path(os.path.join(root, f))
+    if _file_snapshot is None:
+        for full_path in discover_source_files(scan_root, ignore_dirs):
             content = _read_file(full_path)
             if content is None:
                 continue
@@ -256,6 +282,16 @@ def build_shared_graph(
 
             stripped = _strip_comments(content)
             file_imports[full_path] = IMPORT_REGEX.findall(stripped)
+    else:
+        for full_path in sorted(_file_snapshot):
+            record = _file_snapshot[full_path]
+            content = record.get("content")
+            imports = record.get("imports")
+            if not isinstance(content, str) or not isinstance(imports, list):
+                continue
+            all_files.append(full_path)
+            file_map[full_path] = content
+            file_imports[full_path] = [str(value) for value in imports]
 
     # ============================================================
     # PASS 2: Node metadata extraction

@@ -5,7 +5,7 @@
 
 > **Schema Version:** 4.0.0-memory
 > **Entry Point:** `tools/ai_studio_tool/hott_kernel.py`
-> **Fixture Baseline:** 31 fixture minimal + 2 portable integration smoke PASS
+> **Fixture Baseline:** 32 fixture minimal + 2 portable integration smoke PASS
 
 ---
 
@@ -124,6 +124,25 @@ antar-modul sebelum file witness dipilih. Skor ini deterministik untuk snapshot
 dan query yang sama, tetapi bukan bukti bahwa file yang diomit pasti tidak relevan.
 Budget token juga merupakan estimasi portabel `ceil(chars/4)`, bukan tokenizer
 khusus suatu model.
+
+### 2.2B Snapshot Persisten dan Invalidation Inkremental
+
+Kernel melakukan satu discovery/stat pass pada setiap invokasi, tetapi tidak
+membuka source atau mengulang import parsing untuk file yang fingerprint
+stat-nya tidak berubah.
+Snapshot per-file disimpan di `data/codebase/cache/` milik tool dan graph selalu
+dirakit ulang dari record aktif agar add/change/delete langsung mengubah
+resolution edge.
+
+Fingerprint cepat menggunakan `size + mtime_ns + ctime_ns`. Ini adalah trust
+boundary yang eksplisit: filesystem yang dapat mempertahankan ketiga nilai
+setelah isi berubah harus memakai `--cache-mode refresh`. Cache berisi salinan
+source code, di-ignore Git, ditulis atomik, dan diberi permission owner-only
+jika platform mendukungnya. Kegagalan baca/tulis atau JSON rusak tidak
+menggagalkan analisis; kernel melakukan rebuild dan melaporkan statusnya.
+
+Field `graph_cache` membuat reuse dapat diaudit: `status`, `files_reused`,
+`files_read`, `files_added`, `files_changed`, `files_deleted`, dan `hit_ratio`.
 
 ### 2.3 Ide: Memori sebagai Ruang Topologis
 
@@ -368,6 +387,12 @@ hott_kernel.py outline <file> src
 hott_kernel.py brief <file> src --output summary
 hott_kernel.py context "<query>" src [--target file[,file]] [--budget-tokens 1200] [--max-hops 2] [--detail outline|source] [--output prompt|summary|full]
 hott_kernel.py analyzers
+hott_kernel.py cache status|refresh|clear src
+
+# Berlaku pada semua mode codebase; default auto
+hott_kernel.py analyze src --output summary --cache-mode auto|refresh|off
+# Alternatif environment
+AI_STUDIO_GRAPH_CACHE=off hott_kernel.py analyze src --output summary
 ```
 
 #### Memory Operations
@@ -449,6 +474,7 @@ tools/ai_studio_tool/
 │
 ├── core/                            # Shared Foundation (Layer 0)
 │   ├── shared_graph.py              # Canonical graph representation
+│   ├── graph_cache.py               # Persistent snapshot + incremental invalidation
 │   ├── analyzer_registry.py         # Registry & lifecycle management
 │   ├── synthesizer.py               # Invariant encoder & decoder steering
 │   ├── context_optimizer.py         # Query-directed quotient context + budget
@@ -489,6 +515,7 @@ tools/ai_studio_tool/
 │   └── __init__.py                  # Bridge domain exports
 │
 ├── data/                            # Persistent Storage & State
+│   ├── codebase/cache/              # Ignored source snapshots (generated)
 │   ├── memory/                      # Memory stores & baseline files
 │   └── fiber/                       # Active fiber state & fiber archives
 │
@@ -531,7 +558,7 @@ Tidak semua hal perlu terhubung. β₀ tinggi bisa valid jika memang domain berb
 | Memory operations | 12 |
 | Fiber operations | 8 |
 | Safety checks | 2 (cycle prevention, fiber compatibility) |
-| Fixture baseline | 31 fixture minimal + 2 portable integration smoke PASS |
+| Fixture baseline | 32 fixture minimal + 2 portable integration smoke PASS |
 | Betti-preservation | β₁_reasoning = 0 (terjaga di semua operasi) |
 | Zero-dependency | Python 3 stdlib only |
 

@@ -42,6 +42,7 @@ def synthesize_topological_integrity(
     scan_root: str,
     ignore_dirs: Optional[List[str]] = None,
     output_mode: str = "full",
+    shared_graph: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Menjalankan sintesis integritas topologis menggunakan shared graph dan registry."""
     try:
@@ -51,7 +52,8 @@ def synthesize_topological_integrity(
         from shared_graph import build_shared_graph
         from analyzer_registry import run_analyzers
 
-    shared_graph = build_shared_graph(scan_root, ignore_dirs=ignore_dirs)
+    if shared_graph is None:
+        shared_graph = build_shared_graph(scan_root, ignore_dirs=ignore_dirs)
     analyzers_result = run_analyzers(shared_graph)
 
     # Calculate severity counts
@@ -95,6 +97,7 @@ def synthesize_topological_integrity(
 def encode_topological_invariants(
     scan_root: str,
     ignore_dirs: Optional[List[str]] = None,
+    shared_graph: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Mengencode topological fingerprint dari codebase."""
     try:
@@ -106,7 +109,9 @@ def encode_topological_invariants(
         from topology_analyzers import analyze_test_reachability
         from shared_graph import build_shared_graph
 
-    graph = build_shared_graph(scan_root, ignore_dirs=ignore_dirs)
+    graph = shared_graph
+    if graph is None:
+        graph = build_shared_graph(scan_root, ignore_dirs=ignore_dirs)
     manifold_result = analyze_manifold(graph)
     test_reachability_result = analyze_test_reachability(graph)
     manifold = manifold_result.get("manifold", {})
@@ -249,11 +254,16 @@ def establish_baseline(
     scan_root: str,
     baseline_path: Optional[str] = None,
     ignore_dirs: Optional[List[str]] = None,
+    shared_graph: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Establish and save codebase topological baseline."""
     baseline_path = baseline_path or DEFAULT_BASELINE_PATH
     _ensure_baseline_dir(baseline_path)
-    encoded = encode_topological_invariants(scan_root, ignore_dirs=ignore_dirs)
+    encoded = encode_topological_invariants(
+        scan_root,
+        ignore_dirs=ignore_dirs,
+        shared_graph=shared_graph,
+    )
     data = {
         "schema_version": "3.0.0-kernel",
         "created_at": (
@@ -298,10 +308,15 @@ def steer_decoder(
     scan_root: str,
     baseline_path: Optional[str] = None,
     ignore_dirs: Optional[List[str]] = None,
+    shared_graph: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Generate decoder steering signals for codebase."""
     baseline_path = baseline_path or DEFAULT_BASELINE_PATH
-    current = encode_topological_invariants(scan_root, ignore_dirs=ignore_dirs)
+    current = encode_topological_invariants(
+        scan_root,
+        ignore_dirs=ignore_dirs,
+        shared_graph=shared_graph,
+    )
     curr_fp = current.get("topological_fingerprint", {})
     base = load_baseline(baseline_path)
     has_baseline = base is not None
