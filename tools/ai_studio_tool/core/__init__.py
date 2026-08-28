@@ -20,6 +20,7 @@ from core.synthesizer import (
     load_baseline,
     steer_decoder,
 )
+from core.context_optimizer import build_context_pack
 from core.safety import (
     check_memory_association_safety,
     check_betti_preservation,
@@ -43,6 +44,7 @@ __all__ = [
     "establish_baseline",
     "load_baseline",
     "steer_decoder",
+    "build_context_pack",
     "check_memory_association_safety",
     "check_betti_preservation",
     "check_fiber_state_safety",

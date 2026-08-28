@@ -1,21 +1,41 @@
 [
   {
     "name": "hott_kernel",
-    "description": "Unified HoTT Kernel: single entry point untuk seluruh analisis codebase dan memory store. Menjalankan 13 codebase analyzer (topo, perf, hott) dan 5 memory analyzer. Mode 'analyze' untuk findings, 'synthesize' untuk fingerprint + health score + correlations, 'steer' untuk drift detection + steering signals, 'establish' untuk baseline, 'impact'/'outline'/'brief' untuk targeted file analysis, 'memory_*' untuk memory domain, 'xanalyze'/'xsteer'/'xcontext' untuk cross-domain intelligence. Gunakan ini sebagai pengganti semua tool terpisah.",
+    "description": "Unified HoTT Kernel: single entry point untuk seluruh analisis codebase dan memory store. Menjalankan 13 codebase analyzer (topo, perf, hott) dan 5 memory analyzer. Mode 'context' membuat query-directed context pack dengan graph evidence, quotient boundary, provenance, dan hard budget. Mode 'analyze' untuk findings, 'synthesize' untuk fingerprint + health score + correlations, 'steer' untuk drift detection + steering signals, 'establish' untuk baseline, 'impact'/'outline'/'brief' untuk targeted file analysis, 'memory_*' untuk memory domain, 'xanalyze'/'xsteer'/'xcontext' untuk cross-domain intelligence.",
     "parameters": {
       "type": "OBJECT",
       "properties": {
         "mode": {
           "type": "STRING",
-          "description": "Mode operasi: analyze | synthesize | steer | establish | impact | outline | brief | analyzers | memory_store | memory_recall | memory_analyze | memory_stats | memory_associate | memory_consolidate | memory_steer | memory_establish | memory_drift | xanalyze | xsteer | xcontext"
+          "description": "Mode operasi: context | analyze | synthesize | steer | establish | impact | outline | brief | analyzers | memory_store | memory_recall | memory_analyze | memory_stats | memory_associate | memory_consolidate | memory_steer | memory_establish | memory_drift | xanalyze | xsteer | xcontext"
         },
         "scan_root": {
           "type": "STRING",
-          "description": "Root directory untuk scan. Default: 'src'. Untuk mode impact/outline/brief, ini adalah root proyek."
+          "description": "Root directory untuk scan. Default: 'src'. Untuk mode context/impact/outline/brief, ini adalah root proyek."
         },
         "target_file": {
           "type": "STRING",
-          "description": "Path relatif file target untuk mode impact/outline/brief, contoh: 'src/app/app.ts'"
+          "description": "Path relatif file target untuk mode impact/outline/brief atau optional explicit base untuk mode context, contoh: 'src/app/app.ts'"
+        },
+        "query": {
+          "type": "STRING",
+          "description": "Pertanyaan developer untuk mode context. Dipakai untuk lexical evidence matching lalu graph expansion."
+        },
+        "target_files": {
+          "type": "STRING",
+          "description": "Optional comma-separated explicit target files untuk mode context. Target menjadi base projection dan membatasi neighborhood graph."
+        },
+        "budget_tokens": {
+          "type": "STRING",
+          "description": "Mode context: budget token estimasi 256..32000. Hard limit diterapkan sebagai budget karakter = token*4; bukan tokenizer model-specific. Default 1200."
+        },
+        "max_hops": {
+          "type": "STRING",
+          "description": "Mode context: radius shortest-path 0..5 dari semantic/explicit seed. Default 2."
+        },
+        "detail": {
+          "type": "STRING",
+          "description": "Mode context: outline | source. Source menyertakan excerpt terukur. Default source."
         },
         "analyzers": {
           "type": "STRING",
@@ -23,7 +43,7 @@
         },
         "output": {
           "type": "STRING",
-          "description": "Format output: full | summary | findings | graph. Default: full"
+          "description": "Format output umum: full | summary | findings | graph. Mode context: prompt | summary | full, default prompt."
         }
       },
       "required": [

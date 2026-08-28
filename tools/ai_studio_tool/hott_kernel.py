@@ -44,6 +44,19 @@ except ImportError:
         REGISTRY_AVAILABLE = False
 
 try:
+    from core.context_optimizer import (
+        DEFAULT_BUDGET_TOKENS,
+        DEFAULT_MAX_HOPS,
+        MAX_BUDGET_TOKENS,
+        MAX_HOPS,
+        MIN_BUDGET_TOKENS,
+        build_context_pack,
+    )
+    CONTEXT_OPTIMIZER_AVAILABLE = True
+except ImportError:
+    CONTEXT_OPTIMIZER_AVAILABLE = False
+
+try:
     from codebase.targeted_queries import query_impact, query_outline, query_brief
     TOPO_QUERIES_AVAILABLE = True
 except ImportError:
@@ -1330,6 +1343,125 @@ def kernel_brief(
     }
 
 
+def kernel_context(
+    scan_root: str,
+    query: str,
+    target_files: Optional[List[str]] = None,
+    budget_tokens: int = DEFAULT_BUDGET_TOKENS,
+    max_hops: int = DEFAULT_MAX_HOPS,
+    detail: str = "source",
+    output_mode: str = "prompt",
+) -> Dict[str, Any]:
+    """Build a query-directed, budget-bounded context projection for an LLM."""
+    if not SHARED_GRAPH_AVAILABLE or not REGISTRY_AVAILABLE or not CONTEXT_OPTIMIZER_AVAILABLE:
+        return _kernel_error(
+            "context_optimizer_unavailable",
+            "context optimizer dependencies are not available",
+        )
+
+    root_error = _validate_scan_root(scan_root)
+    if root_error:
+        return root_error
+    if not query or not query.strip():
+        return _kernel_error(
+            "empty_context_query",
+            "Context query must contain non-whitespace text.",
+        )
+    output_error = _validate_output_mode(output_mode, ("prompt", "summary", "full"))
+    if output_error:
+        return output_error
+    if detail not in ("outline", "source"):
+        return _kernel_error(
+            "invalid_context_detail",
+            f"Invalid context detail: {detail}",
+            detail=detail,
+            supported_details=["outline", "source"],
+        )
+    if not isinstance(budget_tokens, int) or not MIN_BUDGET_TOKENS <= budget_tokens <= MAX_BUDGET_TOKENS:
+        return _kernel_error(
+            "invalid_context_budget",
+            (
+                f"Context budget must be an integer between {MIN_BUDGET_TOKENS} "
+                f"and {MAX_BUDGET_TOKENS} estimated tokens."
+            ),
+            budget_tokens=budget_tokens,
+            minimum=MIN_BUDGET_TOKENS,
+            maximum=MAX_BUDGET_TOKENS,
+        )
+    if not isinstance(max_hops, int) or not 0 <= max_hops <= MAX_HOPS:
+        return _kernel_error(
+            "invalid_context_hops",
+            f"Context max_hops must be an integer between 0 and {MAX_HOPS}.",
+            max_hops=max_hops,
+            minimum=0,
+            maximum=MAX_HOPS,
+        )
+
+    # One canonical scan; all analyzers and the optimizer reuse this snapshot.
+    graph = build_shared_graph(scan_root)
+    analyzer_output = run_analyzers(graph)
+    pack = build_context_pack(
+        graph,
+        query,
+        target_files=target_files,
+        budget_tokens=budget_tokens,
+        max_hops=max_hops,
+        detail=detail,
+        analyzer_output=analyzer_output,
+    )
+    unresolved_targets = pack.get("selection", {}).get("unresolved_targets", [])
+    if unresolved_targets:
+        return _kernel_error(
+            "context_target_not_found",
+            "One or more explicit context targets could not be resolved uniquely.",
+            unresolved_targets=unresolved_targets,
+            scan_root=scan_root,
+        )
+
+    base = {
+        "schema_version": "3.0.0-kernel",
+        "mode": "context",
+        "output_mode": output_mode,
+        "scan_root": scan_root,
+        "query": query,
+    }
+    if output_mode == "prompt":
+        selection = pack.get("selection", {})
+        return {
+            **base,
+            "model": pack.get("model", {}),
+            "selection": {
+                "mode": selection.get("mode"),
+                "confidence": selection.get("confidence"),
+                "selected_paths": selection.get("selected_paths", []),
+                "resolved_targets": selection.get("resolved_targets", []),
+                "max_hops": selection.get("max_hops"),
+            },
+            "budget": pack.get("budget", {}),
+            "provenance": pack.get("provenance", {}),
+            "context_block": pack.get("context_block", ""),
+        }
+    if output_mode == "summary":
+        return {
+            **base,
+            "model": pack.get("model", {}),
+            "selection": pack.get("selection", {}),
+            "budget": pack.get("budget", {}),
+            "provenance": pack.get("provenance", {}),
+            "quotient_summary": pack.get("quotient_graph", {}).get("summary", {}),
+            "selected_files": [
+                {
+                    "file": item.get("file"),
+                    "score": item.get("score"),
+                    "graph_distance": item.get("graph_distance"),
+                    "selection_signals": item.get("selection_signals", []),
+                }
+                for item in pack.get("selected_files", [])
+            ],
+        }
+    return {**base, **pack}
+
+
 def kernel_establish(
     scan_root: str = ".",
     baseline_path: Optional[str] = None,
@@ -1606,6 +1738,7 @@ def main():
                 "impact": "python3 hott_kernel.py impact <file> [root] [--output full|summary]",
                 "outline": "python3 hott_kernel.py outline <file> [root]",
                 "brief": "python3 hott_kernel.py brief <file> [root] [--output full|summary]",
+                "context": "python3 hott_kernel.py context <query> [root] [--target file[,file]] [--budget-tokens 1200] [--max-hops 2] [--detail outline|source] [--output prompt|summary|full]",
                 "establish": "python3 hott_kernel.py establish [root] [--baseline path]",
                 "synthesize": "python3 hott_kernel.py synthesize [root] [--output full|summary]",
                 "steer": "python3 hott_kernel.py steer [root] [--output full|summary] [--baseline path]",
@@ -1716,6 +1849,62 @@ def main():
             if arg == "--output" and i + 1 < len(sys.argv):
                 output_mode = sys.argv[i + 1]
         result = kernel_brief(root, target, output_mode)
+        _emit_cli_result(result)
+
+    elif mode == "context":
+        if len(sys.argv) < 3 or sys.argv[2].startswith("--"):
+            _emit_cli_result(_kernel_error(
+                "missing_argument",
+                "Usage: hott_kernel.py context <query> [root] [--target file[,file]] [--budget-tokens N] [--max-hops N] [--detail outline|source] [--output prompt|summary|full]",
+            ))
+        query = sys.argv[2]
+        root = sys.argv[3] if len(sys.argv) > 3 and not sys.argv[3].startswith("--") else "."
+        target_files: List[str] = []
+        budget_tokens = DEFAULT_BUDGET_TOKENS
+        max_hops = DEFAULT_MAX_HOPS
+        detail = "source"
+        output_mode = "prompt"
+        parse_error = None
+        for i, arg in enumerate(sys.argv):
+            if arg in ("--target", "--targets") and i + 1 < len(sys.argv):
+                target_files.extend(
+                    value.strip()
+                    for value in sys.argv[i + 1].split(",")
+                    if value.strip()
+                )
+            elif arg == "--budget-tokens" and i + 1 < len(sys.argv):
+                try:
+                    budget_tokens = int(sys.argv[i + 1])
+                except ValueError:
+                    parse_error = _kernel_error(
+                        "invalid_context_budget",
+                        "--budget-tokens must be an integer.",
+                        budget_tokens=sys.argv[i + 1],
+                    )
+            elif arg == "--max-hops" and i + 1 < len(sys.argv):
+                try:
+                    max_hops = int(sys.argv[i + 1])
+                except ValueError:
+                    parse_error = _kernel_error(
+                        "invalid_context_hops",
+                        "--max-hops must be an integer.",
+                        max_hops=sys.argv[i + 1],
+                    )
+            elif arg == "--detail" and i + 1 < len(sys.argv):
+                detail = sys.argv[i + 1]
+            elif arg == "--output" and i + 1 < len(sys.argv):
+                output_mode = sys.argv[i + 1]
+        if parse_error:
+            _emit_cli_result(parse_error)
+        result = kernel_context(
+            root,
+            query,
+            target_files=target_files,
+            budget_tokens=budget_tokens,
+            max_hops=max_hops,
+            detail=detail,
+            output_mode=output_mode,
+        )
         _emit_cli_result(result)
 
     elif mode == "establish":

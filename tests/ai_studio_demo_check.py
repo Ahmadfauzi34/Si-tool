@@ -269,12 +269,96 @@ def test_angular_test_reachability():
     )
 
 
+def test_angular_context_optimizer():
+    """Query context must be measured, deterministic, bounded, and target-local."""
+    cache_args = (
+        "context",
+        "nondeterministic cache key",
+        "src",
+        "--budget-tokens",
+        "500",
+        "--max-hops",
+        "1",
+        "--detail",
+        "source",
+        "--output",
+        "prompt",
+    )
+    cache_context = run_kernel(*cache_args)
+    repeated = run_kernel(*cache_args)
+    cache_file = "src/services/cache.service.ts"
+    expect(
+        cache_context.get("selection", {}).get("selected_paths") == [cache_file],
+        "DEMO: query cache harus memilih cache.service tanpa target eksplisit",
+    )
+    expect(
+        "perf.cache:nondeterministic_cache_key:high"
+        in cache_context.get("context_block", ""),
+        "DEMO: context harus membawa finding witness yang cocok dengan query",
+    )
+    expect(
+        "Date.now()" in cache_context.get("context_block", ""),
+        "DEMO: context harus membawa source excerpt yang relevan",
+    )
+    budget = cache_context.get("budget", {})
+    expect(budget.get("within_budget") is True, "DEMO: context harus mematuhi hard budget")
+    expect(
+        budget.get("used_chars", 1) <= budget.get("char_budget", 0),
+        "DEMO: used chars tidak boleh melewati budget",
+    )
+    expect(
+        cache_context.get("provenance", {}).get("optimizer_additional_filesystem_scans") == 0,
+        "DEMO: optimizer harus reuse SharedGraph tanpa scan tambahan",
+    )
+    expect(
+        cache_context.get("context_block") == repeated.get("context_block"),
+        "DEMO: context block untuk snapshot dan query yang sama harus deterministik",
+    )
+    expect(
+        cache_context.get("provenance", {}).get("graph_content_signature")
+        == repeated.get("provenance", {}).get("graph_content_signature"),
+        "DEMO: content provenance harus stabil",
+    )
+
+    critical_service = "src/topology-lab/test-reachability/critical.service.ts"
+    target_context = run_kernel(
+        "context",
+        "critical service change risk",
+        "src",
+        "--target",
+        critical_service,
+        "--budget-tokens",
+        "700",
+        "--max-hops",
+        "1",
+        "--output",
+        "summary",
+    )
+    expect(
+        target_context.get("selection", {}).get("graph_seeds") == [critical_service],
+        "DEMO: explicit target harus menjadi base projection tunggal",
+    )
+    expect(
+        target_context.get("selection", {}).get("selected_paths") == [
+            critical_service,
+            "src/topology-lab/test-reachability/critical.consumer-a.ts",
+            "src/topology-lab/test-reachability/critical.consumer-b.ts",
+        ],
+        "DEMO: target context harus memilih target dan neighbor satu hop saja",
+    )
+    expect(
+        target_context.get("quotient_summary", {}).get("original_vertex_count") == 27,
+        "DEMO: quotient harus berasal dari snapshot Angular lengkap",
+    )
+
+
 def main():
     for test in (
         test_portable_tool_bundle,
         test_rest_kernel_wiring,
         test_angular_cycle_semantics,
         test_angular_test_reachability,
+        test_angular_context_optimizer,
     ):
         try:
             test()
