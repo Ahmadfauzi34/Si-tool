@@ -7,6 +7,11 @@ dan mengembalikan findings. Tidak ada analyzer yang boleh
 melakukan filesystem scan sendiri.
 """
 
+import hashlib
+import inspect
+import marshal
+import os
+import sys
 from typing import Any, Dict, List, Optional
 
 # Import topology analyzers
@@ -74,6 +79,7 @@ except ImportError:
 
 
 ANALYZER_REGISTRY: Dict[str, Dict[str, Any]] = {}
+ANALYZER_ENGINE_SCHEMA_VERSION = "analyzer-engine-v1"
 
 
 def register_analyzer(name: str, fn: Any, description: str, category: str, available: bool = True) -> None:
@@ -175,6 +181,45 @@ if HOTT_ANALYZERS_AVAILABLE:
 def get_available_analyzers() -> List[str]:
     """Mengembalikan daftar nama analyzer yang terdaftar dan available."""
     return [k for k, v in ANALYZER_REGISTRY.items() if v.get("available", True)]
+
+
+def get_analyzer_engine_signature(
+    analyzer_names: Optional[List[str]] = None,
+) -> str:
+    """Hash analyzer source modules so code changes invalidate cached evidence."""
+    names = analyzer_names if analyzer_names is not None else get_available_analyzers()
+    digest = hashlib.sha256()
+    digest.update(ANALYZER_ENGINE_SCHEMA_VERSION.encode("utf-8"))
+    digest.update(repr(tuple(sys.version_info[:3])).encode("utf-8"))
+    module_payloads: Dict[str, bytes] = {}
+
+    for name in sorted(set(names)):
+        entry = ANALYZER_REGISTRY.get(name, {})
+        fn = entry.get("fn")
+        digest.update(name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(str(entry.get("category", "")).encode("utf-8"))
+        digest.update(b"\0")
+        if not callable(fn):
+            digest.update(b"unavailable\0")
+            continue
+
+        module_name = getattr(fn, "__module__", "")
+        digest.update(module_name.encode("utf-8"))
+        digest.update(b"\0")
+        source_path = inspect.getsourcefile(fn)
+        if source_path and os.path.isfile(source_path):
+            normalized_path = os.path.abspath(source_path)
+            if normalized_path not in module_payloads:
+                with open(normalized_path, "rb") as handle:
+                    module_payloads[normalized_path] = handle.read()
+            payload = module_payloads[normalized_path]
+        else:
+            code = getattr(fn, "__code__", None)
+            payload = marshal.dumps(code) if code is not None else repr(fn).encode("utf-8")
+        digest.update(hashlib.sha256(payload).digest())
+
+    return f"sha256:{digest.hexdigest()}"
 
 
 def run_analyzers(

@@ -11,6 +11,7 @@ SCHEMA_VERSION = "4.0.0-memory"
 def cross_domain_steer(
     scan_root: str = "src",
     shared_graph: Optional[Dict[str, Any]] = None,
+    analyzer_output: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Gabungkan codebase steering + memory steering menjadi unified signal."""
     result = {
@@ -36,14 +37,20 @@ def cross_domain_steer(
     if shared_graph is None:
         codebase_res = steer_decoder(scan_root)
     else:
-        codebase_res = steer_decoder(scan_root, shared_graph=shared_graph)
+        codebase_res = steer_decoder(
+            scan_root,
+            shared_graph=shared_graph,
+            analyzer_output=analyzer_output,
+        )
     codebase_signals = codebase_res.get("steering_signals", {})
     codebase_drift = codebase_res.get("drift_analysis") or {}
     codebase_fingerprint = codebase_res.get("current_fingerprint") or codebase_res.get("fingerprint", {})
 
     try:
         cg = shared_graph if shared_graph is not None else build_shared_graph(scan_root)
-        c_output = run_analyzers(cg, None)
+        c_output = analyzer_output
+        if c_output is None:
+            c_output = run_analyzers(cg, None)
         c_total_files = cg.get("summary", {}).get("total_files", 0)
         c_weights = {"high": 3, "medium": 2, "low": 1, "info": 0}
         c_wsum = sum(
@@ -65,6 +72,8 @@ def cross_domain_steer(
     }
     if shared_graph is not None:
         result["graph_cache"] = shared_graph.get("cache", {})
+    if analyzer_output is not None:
+        result["analyzer_cache"] = analyzer_output.get("cache", {})
 
     # Memory Steering
     try:

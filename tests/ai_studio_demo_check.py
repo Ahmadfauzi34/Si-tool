@@ -290,11 +290,22 @@ def test_angular_context_optimizer():
     cache_file = "src/services/cache.service.ts"
     first_cache = cache_context.get("graph_cache", {})
     repeated_cache = repeated.get("graph_cache", {})
+    first_analyzer_cache = cache_context.get("analyzer_cache", {})
+    repeated_analyzer_cache = repeated.get("analyzer_cache", {})
     expect(first_cache.get("status") == "miss", "DEMO: context awal harus cache miss")
     expect(first_cache.get("files_read") == 27, "DEMO: miss harus membaca 27 source")
     expect(repeated_cache.get("status") == "hit", "DEMO: context kedua harus cache hit")
     expect(repeated_cache.get("files_reused") == 27, "DEMO: hit harus reuse 27 source")
     expect(repeated_cache.get("files_read") == 0, "DEMO: hit tidak boleh membaca source")
+    expect(first_analyzer_cache.get("status") == "miss", "DEMO: analyzer awal harus miss")
+    expect(first_analyzer_cache.get("executed_count") == 13, "DEMO: awal harus eksekusi 13 analyzer")
+    expect(repeated_analyzer_cache.get("status") == "hit", "DEMO: analyzer kedua harus hit")
+    expect(repeated_analyzer_cache.get("reused_count") == 13, "DEMO: hit harus reuse 13 analyzer")
+    expect(repeated_analyzer_cache.get("executed_count") == 0, "DEMO: hit tidak boleh eksekusi analyzer")
+    expect(
+        cache_context.get("provenance", {}).get("analyzer_cache") == first_analyzer_cache,
+        "DEMO: provenance context harus membawa analyzer cache yang sama",
+    )
     expect(
         cache_context.get("selection", {}).get("selected_paths") == [cache_file],
         "DEMO: query cache harus memilih cache.service tanpa target eksplisit",

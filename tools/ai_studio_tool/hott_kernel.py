@@ -56,6 +56,16 @@ except ImportError:
         REGISTRY_AVAILABLE = False
 
 try:
+    from core.analyzer_cache import (
+        clear_analyzer_cache,
+        get_analyzer_cache_status,
+        run_cached_analyzers,
+    )
+    ANALYZER_CACHE_AVAILABLE = True
+except ImportError:
+    ANALYZER_CACHE_AVAILABLE = False
+
+try:
     from core.context_optimizer import (
         DEFAULT_BUDGET_TOKENS,
         DEFAULT_MAX_HOPS,
@@ -293,8 +303,53 @@ def _build_kernel_graph(scan_root: str) -> Dict[str, Any]:
     return graph
 
 
+def _run_kernel_analyzers(
+    graph: Dict[str, Any],
+    analyzer_names: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """Run analyzers under the same cache policy as the canonical graph."""
+    if not REGISTRY_AVAILABLE:
+        return {
+            "analyzers_run": [],
+            "analyzers_succeeded": [],
+            "analyzers_failed": 0,
+            "errors": {},
+            "results": {},
+            "cache": {
+                "mode": "off",
+                "status": "unavailable",
+                "analyzers_requested": analyzer_names or [],
+                "analyzers_reused": [],
+                "analyzers_executed": [],
+                "reused_count": 0,
+                "executed_count": 0,
+                "hit_ratio": 0.0,
+            },
+        }
+    if ANALYZER_CACHE_AVAILABLE:
+        return run_cached_analyzers(
+            graph,
+            analyzer_names,
+            mode=_ACTIVE_GRAPH_CACHE_MODE,
+        )
+
+    output = run_analyzers(graph, analyzer_names)
+    executed = list(output.get("analyzers_run", []))
+    output["cache"] = {
+        "mode": "off",
+        "status": "unavailable",
+        "analyzers_requested": executed,
+        "analyzers_reused": [],
+        "analyzers_executed": executed,
+        "reused_count": 0,
+        "executed_count": len(executed),
+        "hit_ratio": 0.0,
+    }
+    return output
+
+
 def kernel_cache(action: str, scan_root: str = ".") -> Dict[str, Any]:
-    """Inspect, refresh, or clear the persistent SharedGraph snapshot."""
+    """Inspect, refresh, or clear source snapshots and analyzer evidence."""
     if not GRAPH_CACHE_AVAILABLE:
         return _kernel_error(
             "graph_cache_unavailable",
@@ -313,6 +368,27 @@ def kernel_cache(action: str, scan_root: str = ".") -> Dict[str, Any]:
             return root_error
     if action == "status":
         cache_result = get_graph_cache_status(scan_root)
+        if ANALYZER_CACHE_AVAILABLE:
+            analyzer_cache_result = get_analyzer_cache_status(
+                cache_result.get("cache_key", ""),
+                cache_result.get("graph_content_signature"),
+            )
+            source_status = cache_result.get("status")
+            if (
+                source_status != "valid"
+                and analyzer_cache_result.get("status") not in ("missing", "corrupt")
+            ):
+                stale_reasons = list(analyzer_cache_result.get("stale_reasons", []))
+                reason = f"source_snapshot_{source_status}"
+                if reason not in stale_reasons:
+                    stale_reasons.append(reason)
+                analyzer_cache_result.update({
+                    "status": "stale",
+                    "stale_reasons": stale_reasons,
+                })
+            cache_result["analyzer_cache"] = analyzer_cache_result
+        else:
+            cache_result["analyzer_cache"] = {"status": "unavailable"}
     elif action == "clear":
         cache_result = clear_graph_cache(scan_root)
         if cache_result.get("status") == "clear_failed":
@@ -322,11 +398,31 @@ def kernel_cache(action: str, scan_root: str = ".") -> Dict[str, Any]:
                 scan_root=scan_root,
                 cache=cache_result,
             )
+        if ANALYZER_CACHE_AVAILABLE:
+            analyzer_cache_result = clear_analyzer_cache(
+                cache_result.get("cache_key", ""),
+            )
+            cache_result["analyzer_cache"] = analyzer_cache_result
+            if analyzer_cache_result.get("status") == "clear_failed":
+                return _kernel_error(
+                    "analyzer_cache_clear_failed",
+                    "persistent analyzer cache entry could not be removed",
+                    scan_root=scan_root,
+                    cache=cache_result,
+                )
+        else:
+            cache_result["analyzer_cache"] = {"status": "unavailable"}
     else:
         graph = build_cached_shared_graph(scan_root, mode="refresh")
+        analyzer_output = (
+            run_cached_analyzers(graph, mode="refresh")
+            if ANALYZER_CACHE_AVAILABLE and REGISTRY_AVAILABLE
+            else _run_kernel_analyzers(graph)
+        )
         cache_result = graph.get("cache", {})
         cache_result = {
             **cache_result,
+            "analyzer_cache": analyzer_output.get("cache", {}),
             "graph_summary": graph.get("summary", {}),
         }
     return {
@@ -980,7 +1076,7 @@ def kernel_xanalyze(
 
     # Step 1: Build graph + run analyzers
     graph = _build_kernel_graph(scan_root)
-    analyzer_output = run_analyzers(graph, analyzer_names)
+    analyzer_output = _run_kernel_analyzers(graph, analyzer_names)
     analyzer_results = analyzer_output.get("results", {})
 
     # Step 2: Synthesize (untuk correlations & fingerprint)
@@ -989,7 +1085,11 @@ def kernel_xanalyze(
     correlations = _detect_cross_analyzer_correlations(graph, analyzer_output)
     fingerprint = {}
     if ENCODER_AVAILABLE:
-        enc_res = encode_topological_invariants(scan_root, shared_graph=graph)
+        enc_res = encode_topological_invariants(
+            scan_root,
+            shared_graph=graph,
+            analyzer_output=analyzer_output,
+        )
         if enc_res.get("available"):
             fingerprint = enc_res.get("topological_fingerprint", {})
     if not fingerprint and "hott.manifold" in analyzer_results:
@@ -1031,6 +1131,7 @@ def kernel_xanalyze(
             "mode": "xanalyze",
             "scan_root": scan_root,
             "graph_cache": graph.get("cache", {}),
+            "analyzer_cache": analyzer_output.get("cache", {}),
             "analysis_summary": {
                 "total_findings": total_findings,
                 "findings_by_severity": severity_counts,
@@ -1050,6 +1151,7 @@ def kernel_xanalyze(
         "mode": "xanalyze",
         "scan_root": scan_root,
         "graph_cache": graph.get("cache", {}),
+        "analyzer_cache": analyzer_output.get("cache", {}),
         "analyzers": analyzer_output,
         "synthesis": {
             "fingerprint": fingerprint,
@@ -1070,13 +1172,19 @@ def kernel_xsteer(scan_root: str = ".", output_mode: str = "full") -> Dict[str, 
     if root_error:
         return root_error
     graph = _build_kernel_graph(scan_root)
-    result = cross_domain_steer(scan_root, shared_graph=graph)
+    analyzer_output = _run_kernel_analyzers(graph)
+    result = cross_domain_steer(
+        scan_root,
+        shared_graph=graph,
+        analyzer_output=analyzer_output,
+    )
 
     if output_mode == "summary":
         return {
             "schema_version": "4.0.0-memory",
             "mode": "xsteer",
             "graph_cache": graph.get("cache", {}),
+            "analyzer_cache": analyzer_output.get("cache", {}),
             "codebase": result.get("codebase_steering", {}),
             "memory": result.get("memory_steering", {}),
             "consolidation_candidate": result.get("consolidation_signal", {}).get("consolidation_candidate", False),
@@ -1281,7 +1389,7 @@ def kernel_analyze(
 
     # Step 2: Run analyzers
     if REGISTRY_AVAILABLE:
-        analyzer_output = run_analyzers(shared_graph, analyzer_names)
+        analyzer_output = _run_kernel_analyzers(shared_graph, analyzer_names)
     else:
         analyzer_output = {"results": {}, "errors": {}, "analyzers_run": 0}
 
@@ -1314,6 +1422,7 @@ def kernel_analyze(
         "scan_root": scan_root,
         "timestamp": _utc_timestamp(),
         "graph_cache": shared_graph.get("cache", {}),
+        "analyzer_cache": analyzer_output.get("cache", {}),
     }
 
     # Step 4: Filter output berdasarkan mode
@@ -1508,7 +1617,7 @@ def kernel_context(
 
     # One canonical scan; all analyzers and the optimizer reuse this snapshot.
     graph = _build_kernel_graph(scan_root)
-    analyzer_output = run_analyzers(graph)
+    analyzer_output = _run_kernel_analyzers(graph)
     pack = build_context_pack(
         graph,
         query,
@@ -1534,6 +1643,7 @@ def kernel_context(
         "scan_root": scan_root,
         "query": query,
         "graph_cache": graph.get("cache", {}),
+        "analyzer_cache": analyzer_output.get("cache", {}),
     }
     if output_mode == "prompt":
         selection = pack.get("selection", {})
@@ -1583,14 +1693,20 @@ def kernel_establish(
     if root_error:
         return root_error
     graph = _build_kernel_graph(scan_root)
+    analyzer_output = _run_kernel_analyzers(
+        graph,
+        ["hott.manifold", "topo.test_reachability"],
+    )
     result = establish_baseline(
         scan_root,
         baseline_path,
         shared_graph=graph,
+        analyzer_output=analyzer_output,
     )
     return {
         "schema_version": "3.0.0-kernel",
         "graph_cache": graph.get("cache", {}),
+        "analyzer_cache": analyzer_output.get("cache", {}),
         **result,
     }
 
@@ -1725,13 +1841,17 @@ def kernel_synthesize(
     graph = _build_kernel_graph(scan_root)
 
     # Step 2: Run ALL 13 analyzers
-    analyzer_output = run_analyzers(graph, analyzer_names)
+    analyzer_output = _run_kernel_analyzers(graph, analyzer_names)
     results = analyzer_output.get("results", {})
 
     # Step 3: Fingerprint via invariant_encoder
     fingerprint = None
     if ENCODER_AVAILABLE:
-        enc_res = encode_topological_invariants(scan_root, shared_graph=graph)
+        enc_res = encode_topological_invariants(
+            scan_root,
+            shared_graph=graph,
+            analyzer_output=analyzer_output,
+        )
         if enc_res.get("available"):
             fingerprint = enc_res.get("topological_fingerprint")
 
@@ -1775,6 +1895,7 @@ def kernel_synthesize(
             "mode": "synthesize",
             "scan_root": scan_root,
             "graph_cache": graph.get("cache", {}),
+            "analyzer_cache": analyzer_output.get("cache", {}),
             "fingerprint": fingerprint,
             "topological_health_score": health_score,
             "correlations": correlations,
@@ -1786,6 +1907,7 @@ def kernel_synthesize(
             "mode": "synthesize",
             "scan_root": scan_root,
             "graph_cache": graph.get("cache", {}),
+            "analyzer_cache": analyzer_output.get("cache", {}),
             "fingerprint": fingerprint,
             "topological_health_score": health_score,
             "correlations": correlations,
@@ -1799,6 +1921,7 @@ def kernel_synthesize(
             "mode": "synthesize",
             "scan_root": scan_root,
             "graph_cache": graph.get("cache", {}),
+            "analyzer_cache": analyzer_output.get("cache", {}),
             "shared_graph": graph_output,
             "fingerprint": fingerprint,
             "topological_health_score": health_score,
@@ -1825,10 +1948,15 @@ def kernel_steer(
         return output_error
 
     graph = _build_kernel_graph(scan_root)
+    analyzer_output = _run_kernel_analyzers(
+        graph,
+        ["hott.manifold", "topo.test_reachability"],
+    )
     result = steer_decoder(
         scan_root,
         baseline_path,
         shared_graph=graph,
+        analyzer_output=analyzer_output,
     )
 
     if output_mode == "summary":
@@ -1837,6 +1965,7 @@ def kernel_steer(
             "mode": "steer",
             "scan_root": scan_root,
             "graph_cache": graph.get("cache", {}),
+            "analyzer_cache": analyzer_output.get("cache", {}),
             "baseline": result.get("baseline"),
             "summary": result.get("summary"),
             "steering_signals": result.get("steering_signals"),
@@ -1849,6 +1978,7 @@ def kernel_steer(
         "schema_version": "3.0.0-kernel",
         "mode": "steer",
         "graph_cache": graph.get("cache", {}),
+        "analyzer_cache": analyzer_output.get("cache", {}),
         **result,
     }
 
