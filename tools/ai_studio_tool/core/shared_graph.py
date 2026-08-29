@@ -18,6 +18,7 @@ tidak boleh scan filesystem sendiri.
 import os
 import re
 import json
+import hashlib
 import datetime
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -87,6 +88,23 @@ def _read_file(path: str) -> Optional[str]:
             return f.read()
     except Exception:
         return None
+
+
+def graph_content_signature(shared_graph: Dict[str, Any]) -> str:
+    """Hash the stable semantic graph, excluding timestamp and cache metrics."""
+    semantic_graph = {
+        key: value
+        for key, value in shared_graph.items()
+        if key not in ("scan_timestamp", "cache")
+    }
+    encoded = json.dumps(
+        semantic_graph,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    digest = hashlib.sha256(encoded)
+    return f"sha256:{digest.hexdigest()}"
 
 
 def _detect_entrypoint(filename: str) -> Tuple[bool, str, float]:

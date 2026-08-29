@@ -43,6 +43,7 @@ def synthesize_topological_integrity(
     ignore_dirs: Optional[List[str]] = None,
     output_mode: str = "full",
     shared_graph: Optional[Dict[str, Any]] = None,
+    analyzer_output: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Menjalankan sintesis integritas topologis menggunakan shared graph dan registry."""
     try:
@@ -54,7 +55,9 @@ def synthesize_topological_integrity(
 
     if shared_graph is None:
         shared_graph = build_shared_graph(scan_root, ignore_dirs=ignore_dirs)
-    analyzers_result = run_analyzers(shared_graph)
+    analyzers_result = analyzer_output
+    if analyzers_result is None:
+        analyzers_result = run_analyzers(shared_graph)
 
     # Calculate severity counts
     severity_counts = {"high": 0, "medium": 0, "low": 0}
@@ -98,6 +101,7 @@ def encode_topological_invariants(
     scan_root: str,
     ignore_dirs: Optional[List[str]] = None,
     shared_graph: Optional[Dict[str, Any]] = None,
+    analyzer_output: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Mengencode topological fingerprint dari codebase."""
     try:
@@ -112,8 +116,20 @@ def encode_topological_invariants(
     graph = shared_graph
     if graph is None:
         graph = build_shared_graph(scan_root, ignore_dirs=ignore_dirs)
-    manifold_result = analyze_manifold(graph)
-    test_reachability_result = analyze_test_reachability(graph)
+    analyzer_results = (
+        analyzer_output.get("results", {})
+        if isinstance(analyzer_output, dict)
+        else {}
+    )
+    manifold_result = analyzer_results.get("hott.manifold")
+    if not isinstance(manifold_result, dict) or manifold_result.get("error"):
+        manifold_result = analyze_manifold(graph)
+    test_reachability_result = analyzer_results.get("topo.test_reachability")
+    if (
+        not isinstance(test_reachability_result, dict)
+        or test_reachability_result.get("error")
+    ):
+        test_reachability_result = analyze_test_reachability(graph)
     manifold = manifold_result.get("manifold", {})
     betti = manifold.get("betti_numbers", {})
     summary = manifold_result.get("summary", {})
@@ -255,6 +271,7 @@ def establish_baseline(
     baseline_path: Optional[str] = None,
     ignore_dirs: Optional[List[str]] = None,
     shared_graph: Optional[Dict[str, Any]] = None,
+    analyzer_output: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Establish and save codebase topological baseline."""
     baseline_path = baseline_path or DEFAULT_BASELINE_PATH
@@ -263,6 +280,7 @@ def establish_baseline(
         scan_root,
         ignore_dirs=ignore_dirs,
         shared_graph=shared_graph,
+        analyzer_output=analyzer_output,
     )
     data = {
         "schema_version": "3.0.0-kernel",
@@ -309,6 +327,7 @@ def steer_decoder(
     baseline_path: Optional[str] = None,
     ignore_dirs: Optional[List[str]] = None,
     shared_graph: Optional[Dict[str, Any]] = None,
+    analyzer_output: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Generate decoder steering signals for codebase."""
     baseline_path = baseline_path or DEFAULT_BASELINE_PATH
@@ -316,6 +335,7 @@ def steer_decoder(
         scan_root,
         ignore_dirs=ignore_dirs,
         shared_graph=shared_graph,
+        analyzer_output=analyzer_output,
     )
     curr_fp = current.get("topological_fingerprint", {})
     base = load_baseline(baseline_path)

@@ -18,6 +18,11 @@ import re
 from collections import defaultdict, deque
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
+try:
+    from core.shared_graph import graph_content_signature
+except ImportError:
+    from shared_graph import graph_content_signature
+
 
 CONTEXT_MODEL = "query_directed_quotient_context_v1"
 CHARS_PER_TOKEN_ESTIMATE = 4
@@ -64,19 +69,7 @@ def _overlap(query_terms: Set[str], field_terms: Set[str]) -> Tuple[float, List[
 
 
 def _content_signature(shared_graph: Dict[str, Any]) -> str:
-    digest = hashlib.sha256()
-    file_map = shared_graph.get("file_map", {})
-    for path in sorted(shared_graph.get("vertices", [])):
-        digest.update(path.encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(file_map.get(path, "").encode("utf-8"))
-        digest.update(b"\0")
-    for source, target in sorted(shared_graph.get("edges", [])):
-        digest.update(source.encode("utf-8"))
-        digest.update(b"->")
-        digest.update(target.encode("utf-8"))
-        digest.update(b"\0")
-    return f"sha256:{digest.hexdigest()}"
+    return graph_content_signature(shared_graph)
 
 
 def _build_adjacency(
@@ -643,6 +636,7 @@ def build_context_pack(
             "graph_content_signature": signature,
             "scan_root": shared_graph.get("scan_root"),
             "graph_cache": shared_graph.get("cache", {}),
+            "analyzer_cache": analyzer_output.get("cache", {}),
             "shared_graph_scan_passes": 1,
             "optimizer_additional_filesystem_scans": 0,
             "analyzers_share_same_graph": True,

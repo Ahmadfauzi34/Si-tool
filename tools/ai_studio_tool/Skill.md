@@ -6,7 +6,7 @@ name: ai-studio-hott-kernel
 description: |
   HoTT Kernel 4.0 — Unified Codebase Intelligence + Memory Domain + Fibration
   Context Management. Single entry point (hott_kernel.py) untuk 13 codebase
-  analyzers, persistent graph snapshots, query-directed context budgeting,
+  analyzers, persistent graph and analyzer-evidence caches, query-directed context budgeting,
   memory topology operations,
   fiber-based context management,
   dan cross-domain steering. Gunakan untuk SEMUA analisis codebase dan
@@ -60,6 +60,7 @@ STEP 2: Periksa provenance
   → BACA: selection.mode, selection.confidence, selected_paths
   → BACA: graph_content_signature, used_chars, within_budget
   → BACA: graph_cache.status, files_reused, files_read
+  → BACA: analyzer_cache.status, reused_count, executed_count
 
 STEP 3: Drill-down hanya jika evidence belum cukup
   → target sudah diketahui:
@@ -72,9 +73,12 @@ deterministik untuk efisiensi context, bukan proof of irrelevance.
 
 Cache `auto` tetap menjalankan satu discovery/stat pass, lalu memakai ulang
 source+import parse untuk file dengan `size`, `mtime_ns`, dan `ctime_ns` sama.
+Output analyzer sukses juga dipakai ulang hanya jika semantic graph signature
+dan analyzer engine signature sama persis. Error analyzer tidak pernah dicache.
 Gunakan `--cache-mode refresh` bila filesystem dapat mempertahankan ketiga stat
-tersebut setelah isi berubah. Cache mengandung salinan source dan tidak boleh
-dimasukkan ke Git.
+tersebut setelah isi berubah. Source cache mengandung salinan source; analyzer
+cache mengandung evidence turunan. Keduanya lokal dan tidak boleh dimasukkan ke
+Git.
 ```
 
 ### 3.1 Pre-Edit File (WAJIB sebelum edit)
@@ -275,7 +279,7 @@ diabaikan untuk β₀/β₁, sehingga β₁ **bukan** jumlah circular import.
 | `selection.mode=explicit_target_graph` | Target menjadi base projection tunggal | Gunakan untuk pekerjaan pada file yang sudah diketahui |
 | `score_components` | `L`, proximity, centrality, finding severity | Audit alasan file dipilih; jangan anggap skor sebagai probabilitas benar |
 | `quotient_graph` | `G/P` berdasarkan boundary SharedGraph | Gunakan untuk memahami hubungan modul secara ringkas |
-| `graph_content_signature` | Hash content seluruh source dan edge | Context lama stale jika signature berubah |
+| `graph_content_signature` | Hash seluruh semantic SharedGraph stabil | Context/evidence lama stale jika signature berubah |
 | `budget.token_count_is_estimate=true` | Estimasi `ceil(chars/4)` | Jangan samakan dengan tokenizer model tertentu |
 | `optimizer_additional_filesystem_scans=0` | Analyzer dan optimizer memakai snapshot sama | Hindari scan/read source berulang yang tidak diperlukan |
 
@@ -290,6 +294,19 @@ diabaikan untuk β₀/β₁, sehingga β₁ **bukan** jumlah circular import.
 | `status=write_failed` | Analisis sukses tetapi snapshot tidak tersimpan | Periksa permission folder tool |
 | `contains_source_content=true` | Cache menyimpan salinan source | Jaga lokal dan jangan commit |
 | `stat_trust_boundary` | Batas validitas fingerprint cepat | Pakai refresh bila metadata stat tak tepercaya |
+
+### 4.2E Reading `analyzer_cache`
+
+| Field | Interpretasi | Action |
+|---|---|---|
+| `status=hit` | Semua analyzer yang diminta dipakai ulang | `executed_count` harus 0 |
+| `status=partial` | Sebagian evidence tersedia | Audit daftar reuse dan eksekusi |
+| `status=stale` | Source snapshot, graph, atau engine tidak lagi cocok | Jalankan request normal atau `cache refresh` |
+| `status=invalidated` | Graph atau engine analyzer berubah | Periksa `invalidation_reasons`; hasil sudah dihitung ulang |
+| `status=recovered` | Entry rusak berhasil dihitung ulang | Periksa `recovery_reason` |
+| `status=write_failed` | Analisis sukses tetapi evidence tidak tersimpan | Periksa permission folder tool |
+| `contains_full_source_content=false` | Tidak ada snapshot source penuh | Evidence turunan tetap dapat sensitif dan harus lokal |
+| `analyzers_reused/executed` | Provenance per analyzer | Pastikan LLM tahu bukti reused atau fresh |
 
 ### 4.3 Reading `memory analyze` Output
 
@@ -491,6 +508,7 @@ tools/ai_studio_tool/
 ├── core/                            # Shared Foundation (Layer 0)
 │   ├── shared_graph.py              # Canonical graph representation
 │   ├── graph_cache.py               # Persistent snapshot + incremental invalidation
+│   ├── analyzer_cache.py            # Persistent evidence + signature invalidation
 │   ├── analyzer_registry.py         # Registry & lifecycle management
 │   ├── synthesizer.py               # Invariant encoder & decoder steering
 │   ├── context_optimizer.py         # Query-directed quotient context + budget
@@ -498,7 +516,7 @@ tools/ai_studio_tool/
 │   ├── deprecation.py               # Standalone deprecation handlers
 │   └── __init__.py                  # Core exports
 │
-├── data/codebase/cache/             # Generated source snapshots; Git-ignored
+├── data/codebase/cache/             # Source snapshots + analyzer evidence; Git-ignored
 │
 ├── codebase/                        # Codebase Intelligence Domain (Layer 1)
 │   ├── topology_analyzers.py        # Circular deps, risk evaluation

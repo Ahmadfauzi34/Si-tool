@@ -26,6 +26,7 @@ try:
         _strip_comments,
         build_shared_graph,
         discover_source_files,
+        graph_content_signature,
     )
 except ImportError:
     from shared_graph import (  # type: ignore
@@ -36,10 +37,12 @@ except ImportError:
         _strip_comments,
         build_shared_graph,
         discover_source_files,
+        graph_content_signature,
     )
 
 
-CACHE_SCHEMA_VERSION = "shared-graph-cache-v1"
+CACHE_SCHEMA_VERSION = "shared-graph-cache-v2"
+LEGACY_CACHE_SCHEMA_VERSIONS = ("shared-graph-cache-v1",)
 PARSER_VERSION = f"imports-v1+shared-graph-{SHARED_GRAPH_SCHEMA_VERSION}"
 CACHE_MODES = ("auto", "refresh", "off")
 
@@ -75,13 +78,14 @@ def _normalized_ignore_dirs(ignore_dirs: Optional[Iterable[str]]) -> List[str]:
 def _cache_identity(
     scan_root: str,
     ignore_dirs: Optional[Iterable[str]],
+    cache_schema_version: str = CACHE_SCHEMA_VERSION,
 ) -> Dict[str, Any]:
     return {
         "root_absolute": _normalize_path(os.path.abspath(scan_root)),
         "graph_scan_root": _normalize_path(scan_root),
         "ignore_dirs": _normalized_ignore_dirs(ignore_dirs),
         "parser_version": PARSER_VERSION,
-        "cache_schema_version": CACHE_SCHEMA_VERSION,
+        "cache_schema_version": cache_schema_version,
     }
 
 
@@ -99,6 +103,42 @@ def _cache_location(
     key = _cache_key(identity)
     directory = os.path.abspath(cache_dir or DEFAULT_GRAPH_CACHE_DIR)
     return identity, key, os.path.join(directory, f"shared_graph_{key}.json")
+
+
+def _legacy_cache_paths(
+    scan_root: str,
+    ignore_dirs: Optional[Iterable[str]],
+    cache_dir: Optional[str],
+) -> List[str]:
+    directory = os.path.abspath(cache_dir or DEFAULT_GRAPH_CACHE_DIR)
+    paths = []
+    for schema_version in LEGACY_CACHE_SCHEMA_VERSIONS:
+        identity = _cache_identity(
+            scan_root,
+            ignore_dirs,
+            cache_schema_version=schema_version,
+        )
+        paths.append(
+            os.path.join(directory, f"shared_graph_{_cache_key(identity)}.json")
+        )
+    return paths
+
+
+def _remove_legacy_entries(
+    scan_root: str,
+    ignore_dirs: Optional[Iterable[str]],
+    cache_dir: Optional[str],
+) -> List[str]:
+    removed = []
+    for path in _legacy_cache_paths(scan_root, ignore_dirs, cache_dir):
+        if not os.path.exists(path):
+            continue
+        try:
+            os.unlink(path)
+            removed.append(_display_cache_path(path))
+        except OSError:
+            pass
+    return removed
 
 
 def _display_cache_path(cache_path: str) -> str:
@@ -163,6 +203,8 @@ def _load_cache(
     records = payload.get("files")
     if not isinstance(records, dict):
         return None, "cache_files_not_object"
+    if not isinstance(payload.get("graph_content_signature"), str):
+        return None, "cache_graph_signature_missing"
     if not all(
         isinstance(path, str) and _validate_record(record)
         for path, record in records.items()
@@ -218,6 +260,7 @@ def _write_cache(
     identity: Dict[str, Any],
     records: Dict[str, Dict[str, Any]],
     created_at: Optional[str],
+    graph_signature: str,
 ) -> Optional[str]:
     directory = os.path.dirname(cache_path)
     temporary_path: Optional[str] = None
@@ -231,6 +274,7 @@ def _write_cache(
             "updated_at": _utc_now(),
             "contains_source_content": True,
             "stat_trust_boundary": STAT_TRUST_BOUNDARY,
+            "graph_content_signature": graph_signature,
             "files": dict(sorted(records.items())),
         }
         with tempfile.NamedTemporaryFile(
@@ -317,6 +361,7 @@ def build_cached_shared_graph(
         metrics.update({
             "status": "disabled",
             "files_read": graph.get("summary", {}).get("total_files", 0),
+            "graph_content_signature": graph_content_signature(graph),
         })
         graph["cache"] = metrics
         return graph
@@ -378,19 +423,6 @@ def build_cached_shared_graph(
             4,
         )
 
-    should_write = status != "hit" or bool(metrics["read_failures"])
-    if should_write:
-        write_error = _write_cache(
-            cache_path,
-            identity,
-            records,
-            cached_payload.get("created_at") if cached_payload else None,
-        )
-        if write_error:
-            metrics["status_before_write"] = metrics["status"]
-            metrics["status"] = "write_failed"
-            metrics["write_error"] = write_error
-
     snapshot = {
         path: {"content": record["content"], "imports": record["imports"]}
         for path, record in records.items()
@@ -400,6 +432,39 @@ def build_cached_shared_graph(
         ignore_dirs=ignored,
         _file_snapshot=snapshot,
     )
+    signature = graph_content_signature(graph)
+    metrics["graph_content_signature"] = signature
+    if (
+        status == "hit"
+        and cached_payload is not None
+        and cached_payload.get("graph_content_signature") != signature
+    ):
+        status = "recovered"
+        metrics["status"] = status
+        metrics["recovery_reason"] = "cache_graph_signature_mismatch"
+
+    should_write = status != "hit" or bool(metrics["read_failures"])
+    if should_write:
+        write_error = _write_cache(
+            cache_path,
+            identity,
+            records,
+            cached_payload.get("created_at") if cached_payload else None,
+            signature,
+        )
+        if write_error:
+            metrics["status_before_write"] = metrics["status"]
+            metrics["status"] = "write_failed"
+            metrics["write_error"] = write_error
+        else:
+            legacy_removed = _remove_legacy_entries(
+                scan_root,
+                ignored,
+                cache_dir,
+            )
+            if legacy_removed:
+                metrics["legacy_entries_removed"] = legacy_removed
+
     graph["cache"] = metrics
     return graph
 
@@ -425,6 +490,11 @@ def get_graph_cache_status(
         result.update({"status": "corrupt", "reason": load_error})
         return result
     if cached_payload is None:
+        legacy_paths = [
+            _display_cache_path(path)
+            for path in _legacy_cache_paths(scan_root, ignored, cache_dir)
+            if os.path.exists(path)
+        ]
         result.update({
             "status": "missing",
             "files_reusable": 0,
@@ -432,6 +502,8 @@ def get_graph_cache_status(
             "files_changed": 0,
             "files_deleted": 0,
         })
+        if legacy_paths:
+            result["legacy_entries_found"] = legacy_paths
         return result
 
     records = cached_payload.get("files", {})
@@ -456,6 +528,7 @@ def get_graph_cache_status(
         "files_deleted": deleted,
         "created_at": cached_payload.get("created_at"),
         "updated_at": cached_payload.get("updated_at"),
+        "graph_content_signature": cached_payload.get("graph_content_signature"),
     })
     return result
 
@@ -466,31 +539,38 @@ def clear_graph_cache(
     cache_dir: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Delete only the cache entry associated with one root/configuration."""
-    identity, key, cache_path = _cache_location(scan_root, ignore_dirs, cache_dir)
+    ignored: Set[str] = set(_normalized_ignore_dirs(ignore_dirs))
+    identity, key, cache_path = _cache_location(scan_root, ignored, cache_dir)
     del identity  # Key calculation is the only identity use needed here.
-    existed = os.path.exists(cache_path)
-    if existed:
+    paths = [cache_path, *_legacy_cache_paths(scan_root, ignored, cache_dir)]
+    existing_paths = [path for path in paths if os.path.exists(path)]
+    removed_paths = []
+    for path in existing_paths:
         try:
-            os.unlink(cache_path)
+            os.unlink(path)
+            removed_paths.append(_display_cache_path(path))
         except OSError as exc:
             return {
                 "status": "clear_failed",
                 "cache_key": key,
-                "cache_path": _display_cache_path(cache_path),
-                "removed": False,
+                "cache_path": _display_cache_path(path),
+                "removed": bool(removed_paths),
+                "removed_paths": removed_paths,
                 "error": f"cache_clear_error:{type(exc).__name__}",
             }
     return {
-        "status": "cleared" if existed else "already_missing",
+        "status": "cleared" if removed_paths else "already_missing",
         "cache_key": key,
         "cache_path": _display_cache_path(cache_path),
-        "removed": existed,
+        "removed": bool(removed_paths),
+        "removed_paths": removed_paths,
     }
 
 
 __all__ = [
     "CACHE_MODES",
     "CACHE_SCHEMA_VERSION",
+    "LEGACY_CACHE_SCHEMA_VERSIONS",
     "DEFAULT_GRAPH_CACHE_DIR",
     "PARSER_VERSION",
     "STAT_TRUST_BOUNDARY",

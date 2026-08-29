@@ -5,7 +5,7 @@
 
 > **Schema Version:** 4.0.0-memory
 > **Entry Point:** `tools/ai_studio_tool/hott_kernel.py`
-> **Fixture Baseline:** 32 fixture minimal + 2 portable integration smoke PASS
+> **Fixture Baseline:** 33 fixture minimal + 2 portable integration smoke PASS
 
 ---
 
@@ -125,24 +125,39 @@ dan query yang sama, tetapi bukan bukti bahwa file yang diomit pasti tidak relev
 Budget token juga merupakan estimasi portabel `ceil(chars/4)`, bukan tokenizer
 khusus suatu model.
 
-### 2.2B Snapshot Persisten dan Invalidation Inkremental
+### 2.2B Cache Persisten Dua Lapis
 
-Kernel melakukan satu discovery/stat pass pada setiap invokasi, tetapi tidak
-membuka source atau mengulang import parsing untuk file yang fingerprint
-stat-nya tidak berubah.
-Snapshot per-file disimpan di `data/codebase/cache/` milik tool dan graph selalu
-dirakit ulang dari record aktif agar add/change/delete langsung mengubah
-resolution edge.
+Lapis pertama menyimpan snapshot source. Kernel tetap melakukan satu
+discovery/stat pass pada setiap invokasi, tetapi tidak membuka source atau
+mengulang import parsing untuk file yang fingerprint stat-nya tidak berubah.
+Snapshot per-file disimpan di `data/codebase/cache/` dan graph selalu dirakit
+ulang dari record aktif agar add/change/delete langsung mengubah resolution
+edge.
 
 Fingerprint cepat menggunakan `size + mtime_ns + ctime_ns`. Ini adalah trust
 boundary yang eksplisit: filesystem yang dapat mempertahankan ketiga nilai
 setelah isi berubah harus memakai `--cache-mode refresh`. Cache berisi salinan
 source code, di-ignore Git, ditulis atomik, dan diberi permission owner-only
-jika platform mendukungnya. Kegagalan baca/tulis atau JSON rusak tidak
-menggagalkan analisis; kernel melakukan rebuild dan melaporkan statusnya.
+jika platform mendukungnya.
+
+Lapis kedua menyimpan hasil analyzer deterministik di
+`data/codebase/cache/analyzers/`. Evidence hanya boleh dipakai ulang jika
+identitas root, hash seluruh semantic `SharedGraph`, dan hash source engine
+analyzer sama persis. Perubahan source, edge, metadata graph, versi graph, atau
+implementasi analyzer membatalkan evidence. Hanya hasil sukses yang disimpan;
+error analyzer selalu dijalankan ulang. Entry ini tidak menyimpan source penuh,
+tetapi dapat memuat evidence turunan seperti path, finding, dan snippet, sehingga
+tetap lokal, Git-ignored, atomik, dan owner-only.
+
+Kegagalan baca/tulis atau JSON rusak pada salah satu lapis tidak menggagalkan
+analisis; kernel menghitung ulang dan melaporkan statusnya. `--cache-mode`
+berlaku pada kedua lapis, sedangkan `cache status|refresh|clear` mengelola
+keduanya untuk root yang sama.
 
 Field `graph_cache` membuat reuse dapat diaudit: `status`, `files_reused`,
 `files_read`, `files_added`, `files_changed`, `files_deleted`, dan `hit_ratio`.
+Field `analyzer_cache` melaporkan `status`, `analyzers_reused`,
+`analyzers_executed`, `reused_count`, `executed_count`, dan signature invalidasi.
 
 ### 2.3 Ide: Memori sebagai Ruang Topologis
 
@@ -475,6 +490,7 @@ tools/ai_studio_tool/
 ├── core/                            # Shared Foundation (Layer 0)
 │   ├── shared_graph.py              # Canonical graph representation
 │   ├── graph_cache.py               # Persistent snapshot + incremental invalidation
+│   ├── analyzer_cache.py            # Persistent evidence + exact-signature invalidation
 │   ├── analyzer_registry.py         # Registry & lifecycle management
 │   ├── synthesizer.py               # Invariant encoder & decoder steering
 │   ├── context_optimizer.py         # Query-directed quotient context + budget
@@ -515,7 +531,7 @@ tools/ai_studio_tool/
 │   └── __init__.py                  # Bridge domain exports
 │
 ├── data/                            # Persistent Storage & State
-│   ├── codebase/cache/              # Ignored source snapshots (generated)
+│   ├── codebase/cache/              # Ignored source snapshots + analyzer evidence
 │   ├── memory/                      # Memory stores & baseline files
 │   └── fiber/                       # Active fiber state & fiber archives
 │
@@ -558,7 +574,7 @@ Tidak semua hal perlu terhubung. β₀ tinggi bisa valid jika memang domain berb
 | Memory operations | 12 |
 | Fiber operations | 8 |
 | Safety checks | 2 (cycle prevention, fiber compatibility) |
-| Fixture baseline | 32 fixture minimal + 2 portable integration smoke PASS |
+| Fixture baseline | 33 fixture minimal + 2 portable integration smoke PASS |
 | Betti-preservation | β₁_reasoning = 0 (terjaga di semua operasi) |
 | Zero-dependency | Python 3 stdlib only |
 

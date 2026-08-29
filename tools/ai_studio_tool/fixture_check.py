@@ -1916,6 +1916,9 @@ def test_f35_incremental_graph_cache():
     source_project = ROOT / "fixtures_min/f35_incremental_cache/project/src"
 
     from core.graph_cache import (
+        LEGACY_CACHE_SCHEMA_VERSIONS,
+        _cache_identity,
+        _cache_key,
         build_cached_shared_graph,
         clear_graph_cache,
         get_graph_cache_status,
@@ -1926,12 +1929,26 @@ def test_f35_incremental_graph_cache():
         cache_dir = Path(temporary_root) / "cache"
         shutil.copytree(source_project, project)
 
+        legacy_identity = _cache_identity(
+            str(project),
+            None,
+            cache_schema_version=LEGACY_CACHE_SCHEMA_VERSIONS[0],
+        )
+        legacy_path = cache_dir / f"shared_graph_{_cache_key(legacy_identity)}.json"
+        legacy_path.parent.mkdir(parents=True, exist_ok=True)
+        legacy_path.write_text("legacy-cache", encoding="utf-8")
+
         first = build_cached_shared_graph(str(project), cache_dir=str(cache_dir))
         first_cache = first.get("cache", {})
         expect(first_cache.get("status") == "miss", f"{name}: build awal harus miss")
         expect(first_cache.get("files_read") == 3, f"{name}: build awal harus baca 3 file")
         expect(first_cache.get("files_added") == 3, f"{name}: build awal harus catat 3 file baru")
         expect(first_cache.get("contains_source_content") is True, f"{name}: disclosure source wajib")
+        expect(not legacy_path.exists(), f"{name}: cache schema lama harus dibersihkan setelah migrasi")
+        expect(
+            first_cache.get("legacy_entries_removed"),
+            f"{name}: cleanup cache lama harus terlihat di provenance",
+        )
 
         second = build_cached_shared_graph(str(project), cache_dir=str(cache_dir))
         second_cache = second.get("cache", {})
@@ -2029,6 +2046,252 @@ def test_f35_incremental_graph_cache():
             write_failed.get("summary", {}).get("total_files") == 3,
             f"{name}: write failure tetap harus menghasilkan graph lengkap",
         )
+
+
+def test_f36_analyzer_evidence_cache():
+    name = "F36"
+    source_project = ROOT / "fixtures_min/f35_incremental_cache/project/src"
+
+    from core.analyzer_cache import (
+        clear_analyzer_cache,
+        get_analyzer_cache_status,
+        run_cached_analyzers,
+    )
+    from core.graph_cache import build_cached_shared_graph
+
+    with tempfile.TemporaryDirectory() as temporary_root:
+        project = Path(temporary_root) / "project"
+        graph_cache_dir = Path(temporary_root) / "graph-cache"
+        analyzer_cache_dir = Path(temporary_root) / "analyzer-cache"
+        shutil.copytree(source_project, project)
+
+        graph = build_cached_shared_graph(
+            str(project),
+            cache_dir=str(graph_cache_dir),
+        )
+        first = run_cached_analyzers(
+            graph,
+            cache_dir=str(analyzer_cache_dir),
+        )
+        first_cache = first.get("cache", {})
+        expect(first_cache.get("status") == "miss", f"{name}: analyzer awal harus miss")
+        expect(first_cache.get("executed_count") == 13, f"{name}: awal harus eksekusi 13 analyzer")
+        expect(first_cache.get("reused_count") == 0, f"{name}: awal tidak boleh reuse")
+        expect(
+            first_cache.get("contains_full_source_content") is False,
+            f"{name}: cache analyzer tidak boleh menyimpan source penuh",
+        )
+        expect(
+            first_cache.get("contains_derived_source_evidence") is True,
+            f"{name}: derived evidence harus diungkapkan",
+        )
+        analyzer_cache_path = Path(first_cache.get("cache_path", ""))
+        expect(analyzer_cache_path.exists(), f"{name}: entry analyzer harus persisten")
+        if analyzer_cache_path.exists():
+            expect(
+                analyzer_cache_path.stat().st_mode & 0o777 == 0o600,
+                f"{name}: permission cache analyzer harus 0600",
+            )
+
+        second = run_cached_analyzers(
+            graph,
+            cache_dir=str(analyzer_cache_dir),
+        )
+        second_cache = second.get("cache", {})
+        expect(second_cache.get("status") == "hit", f"{name}: analyzer kedua harus hit")
+        expect(second_cache.get("reused_count") == 13, f"{name}: 13 analyzer harus reuse")
+        expect(second_cache.get("executed_count") == 0, f"{name}: hit tidak boleh eksekusi")
+        expect(first.get("results") == second.get("results"), f"{name}: evidence hit harus identik")
+
+        source_key = first_cache.get("source_cache_key", "")
+        cleared_for_partial = clear_analyzer_cache(
+            source_key,
+            cache_dir=str(analyzer_cache_dir),
+        )
+        expect(cleared_for_partial.get("status") == "cleared", f"{name}: setup partial harus clear")
+        subset_names = ["perf.cache", "topo.circular"]
+        subset = run_cached_analyzers(
+            graph,
+            subset_names,
+            cache_dir=str(analyzer_cache_dir),
+        )
+        expect(subset.get("cache", {}).get("executed_count") == 2, f"{name}: subset harus eksekusi 2")
+        partial = run_cached_analyzers(
+            graph,
+            cache_dir=str(analyzer_cache_dir),
+        )
+        partial_cache = partial.get("cache", {})
+        expect(partial_cache.get("status") == "partial", f"{name}: cache subset harus partial")
+        expect(partial_cache.get("reused_count") == 2, f"{name}: partial harus reuse subset")
+        expect(partial_cache.get("executed_count") == 11, f"{name}: partial harus eksekusi sisanya")
+
+        old_signature = partial_cache.get("graph_content_signature")
+        (project / "b.ts").write_text(
+            "import './c';\nexport const b = true;\n",
+            encoding="utf-8",
+        )
+        changed_graph = build_cached_shared_graph(
+            str(project),
+            cache_dir=str(graph_cache_dir),
+        )
+        changed = run_cached_analyzers(
+            changed_graph,
+            cache_dir=str(analyzer_cache_dir),
+        )
+        changed_cache = changed.get("cache", {})
+        expect(changed_cache.get("status") == "invalidated", f"{name}: source change harus invalidate")
+        expect(
+            "graph_content_changed" in changed_cache.get("invalidation_reasons", []),
+            f"{name}: alasan invalidasi graph harus eksplisit",
+        )
+        expect(changed_cache.get("executed_count") == 13, f"{name}: graph baru harus hitung ulang")
+        expect(
+            changed_cache.get("graph_content_signature") != old_signature,
+            f"{name}: mutation harus mengubah graph signature",
+        )
+
+        semantic_graph = json.loads(json.dumps(changed_graph))
+        semantic_vertex = sorted(semantic_graph.get("vertices", []))[0]
+        semantic_graph["node_metadata"][semantic_vertex]["type"] = "SemanticMutation"
+        semantic_invalidated = run_cached_analyzers(
+            semantic_graph,
+            cache_dir=str(analyzer_cache_dir),
+        )
+        expect(
+            semantic_invalidated.get("cache", {}).get("status") == "invalidated",
+            f"{name}: perubahan metadata graph harus invalidate",
+        )
+        expect(
+            "graph_content_changed"
+            in semantic_invalidated.get("cache", {}).get("invalidation_reasons", []),
+            f"{name}: signature harus mencakup semantic graph, bukan source saja",
+        )
+        restored_graph = run_cached_analyzers(
+            changed_graph,
+            cache_dir=str(analyzer_cache_dir),
+        )
+        expect(
+            restored_graph.get("cache", {}).get("status") == "invalidated",
+            f"{name}: graph canonical harus mengganti synthetic evidence",
+        )
+
+        analyzer_cache_path = Path(restored_graph.get("cache", {}).get("cache_path", ""))
+        payload = json.loads(analyzer_cache_path.read_text(encoding="utf-8"))
+        payload["engine_signature"] = "sha256:stale-engine"
+        analyzer_cache_path.write_text(json.dumps(payload), encoding="utf-8")
+        engine_invalidated = run_cached_analyzers(
+            changed_graph,
+            cache_dir=str(analyzer_cache_dir),
+        )
+        engine_cache = engine_invalidated.get("cache", {})
+        expect(engine_cache.get("status") == "invalidated", f"{name}: engine change harus invalidate")
+        expect(
+            "analyzer_engine_changed" in engine_cache.get("invalidation_reasons", []),
+            f"{name}: alasan invalidasi engine harus eksplisit",
+        )
+        expect(engine_cache.get("executed_count") == 13, f"{name}: engine baru harus hitung ulang")
+
+        analyzer_cache_path.write_text("{cache-rusak", encoding="utf-8")
+        recovered = run_cached_analyzers(
+            changed_graph,
+            cache_dir=str(analyzer_cache_dir),
+        )
+        recovered_cache = recovered.get("cache", {})
+        expect(recovered_cache.get("status") == "recovered", f"{name}: corrupt harus recovery")
+        expect(recovered_cache.get("executed_count") == 13, f"{name}: recovery harus hitung ulang")
+        expect(
+            str(recovered_cache.get("recovery_reason", "")).startswith("analyzer_cache_read_error:"),
+            f"{name}: alasan recovery harus transparan",
+        )
+
+        refreshed = run_cached_analyzers(
+            changed_graph,
+            cache_dir=str(analyzer_cache_dir),
+            mode="refresh",
+        )
+        expect(refreshed.get("cache", {}).get("status") == "refreshed", f"{name}: refresh eksplisit")
+        expect(refreshed.get("cache", {}).get("executed_count") == 13, f"{name}: refresh hitung ulang")
+        status = get_analyzer_cache_status(
+            source_key,
+            changed_cache.get("graph_content_signature"),
+            cache_dir=str(analyzer_cache_dir),
+        )
+        expect(status.get("status") == "valid", f"{name}: status analyzer harus valid")
+        expect(status.get("analyzer_count") == 13, f"{name}: status harus lapor 13 analyzer")
+
+        disabled = run_cached_analyzers(
+            changed_graph,
+            subset_names,
+            cache_dir=str(analyzer_cache_dir),
+            mode="off",
+        )
+        expect(disabled.get("cache", {}).get("status") == "disabled", f"{name}: mode off harus bypass")
+        expect(disabled.get("cache", {}).get("executed_count") == 2, f"{name}: off tetap eksekusi subset")
+
+        error_cache_dir = Path(temporary_root) / "error-cache"
+        first_error = run_cached_analyzers(
+            changed_graph,
+            ["tidak.ada"],
+            cache_dir=str(error_cache_dir),
+        )
+        second_error = run_cached_analyzers(
+            changed_graph,
+            ["tidak.ada"],
+            cache_dir=str(error_cache_dir),
+        )
+        expect(first_error.get("analyzers_failed") == 1, f"{name}: analyzer error harus terlihat")
+        expect(second_error.get("cache", {}).get("executed_count") == 1, f"{name}: error tidak boleh dicache")
+        expect(second_error.get("cache", {}).get("reused_count") == 0, f"{name}: error tidak boleh reuse")
+
+        cleared = clear_analyzer_cache(
+            source_key,
+            cache_dir=str(analyzer_cache_dir),
+        )
+        expect(cleared.get("status") == "cleared", f"{name}: clear harus menghapus evidence")
+        missing = get_analyzer_cache_status(
+            source_key,
+            cache_dir=str(analyzer_cache_dir),
+        )
+        expect(missing.get("status") == "missing", f"{name}: status setelah clear harus missing")
+
+        write_failed = run_cached_analyzers(
+            changed_graph,
+            cache_dir=str(project / "a.ts"),
+        )
+        expect(
+            write_failed.get("cache", {}).get("status") == "write_failed",
+            f"{name}: write failure tidak boleh menggagalkan analyzer",
+        )
+        expect(
+            len(write_failed.get("results", {})) == 13,
+            f"{name}: write failure tetap harus menghasilkan 13 evidence",
+        )
+
+        from hott_kernel import kernel_cache
+
+        kernel_cache("clear", str(project))
+        kernel_refresh = kernel_cache("refresh", str(project))
+        expect(
+            kernel_refresh.get("cache", {}).get("analyzer_cache", {}).get("status")
+            == "refreshed",
+            f"{name}: kernel refresh harus mengisi dua lapis cache",
+        )
+        (project / "a.ts").write_text(
+            "import './b';\nexport const a = 'changed-after-refresh';\n",
+            encoding="utf-8",
+        )
+        stale_status = kernel_cache("status", str(project)).get("cache", {})
+        expect(stale_status.get("status") == "stale", f"{name}: source mutation harus stale")
+        expect(
+            stale_status.get("analyzer_cache", {}).get("status") == "stale",
+            f"{name}: analyzer status harus mengikuti source stale",
+        )
+        expect(
+            "source_snapshot_stale"
+            in stale_status.get("analyzer_cache", {}).get("stale_reasons", []),
+            f"{name}: alasan stale source harus eksplisit",
+        )
+        kernel_cache("clear", str(project))
 
 
 def test_f31_memory_topology_betti():
@@ -2131,6 +2394,13 @@ def test_kernel_wiring_smoke():
     first_cache = context_result.get("graph_cache", {})
     expect(first_cache.get("status") == "miss", "KERNEL: context awal harus cache miss")
     expect(first_cache.get("files_read") == 3, "KERNEL: context awal harus baca 3 source")
+    first_analyzer_cache = context_result.get("analyzer_cache", {})
+    expect(first_analyzer_cache.get("status") == "miss", "KERNEL: analyzer awal harus cache miss")
+    expect(first_analyzer_cache.get("executed_count") == 13, "KERNEL: awal harus eksekusi 13 analyzer")
+    expect(
+        context_result.get("provenance", {}).get("analyzer_cache") == first_analyzer_cache,
+        "KERNEL: provenance context harus membawa analyzer cache yang sama",
+    )
 
     repeated_context = _run_kernel(
         "context",
@@ -2147,14 +2417,30 @@ def test_kernel_wiring_smoke():
     expect(repeated_cache.get("status") == "hit", "KERNEL: context kedua harus cache hit")
     expect(repeated_cache.get("files_reused") == 3, "KERNEL: context kedua harus reuse 3 source")
     expect(repeated_cache.get("files_read") == 0, "KERNEL: context kedua tidak boleh baca source")
+    repeated_analyzer_cache = repeated_context.get("analyzer_cache", {})
+    expect(repeated_analyzer_cache.get("status") == "hit", "KERNEL: analyzer kedua harus cache hit")
+    expect(repeated_analyzer_cache.get("reused_count") == 13, "KERNEL: 13 analyzer harus reuse")
+    expect(repeated_analyzer_cache.get("executed_count") == 0, "KERNEL: analyzer hit tidak boleh eksekusi")
     expect(
         context_result.get("context_block") == repeated_context.get("context_block"),
         "KERNEL: cache tidak boleh mengubah context block",
     )
     cache_status = _run_kernel("cache", "status", project).get("cache", {})
     expect(cache_status.get("status") == "valid", "KERNEL: cache status harus valid")
+    expect(
+        cache_status.get("analyzer_cache", {}).get("status") == "valid",
+        "KERNEL: cache status harus mencakup analyzer evidence",
+    )
+    expect(
+        cache_status.get("analyzer_cache", {}).get("analyzer_count") == 13,
+        "KERNEL: cache status harus lapor 13 analyzer",
+    )
 
-    _run_kernel("steer", project, "--output", "summary")
+    steer = _run_kernel("steer", project, "--output", "summary")
+    expect(
+        steer.get("analyzer_cache", {}).get("status") == "hit",
+        "KERNEL: steer harus reuse evidence yang relevan",
+    )
 
     for args in (
         ("memory", "steer", "--output", "summary"),
@@ -2273,6 +2559,10 @@ def test_kernel_cli_contract():
         cache_off.get("graph_cache", {}).get("status") == "disabled",
         "CLI: mode off harus terlihat dalam provenance",
     )
+    expect(
+        cache_off.get("analyzer_cache", {}).get("status") == "disabled",
+        "CLI: mode off harus membypass analyzer cache juga",
+    )
 
     completed, invalid_budget = run_raw(
         "context",
@@ -2353,6 +2643,7 @@ def main():
         test_f33_static_test_reachability,
         test_f34_context_optimizer,
         test_f35_incremental_graph_cache,
+        test_f36_analyzer_evidence_cache,
         test_kernel_wiring_smoke,
         test_kernel_cli_contract,
     ]
@@ -2369,7 +2660,7 @@ def main():
             print(f"- {failure}")
         sys.exit(1)
 
-    print("PASS: 32 fixture minimal + 2 portable integration smoke aman")
+    print("PASS: 33 fixture minimal + 2 portable integration smoke aman")
 
 
 if __name__ == "__main__":
