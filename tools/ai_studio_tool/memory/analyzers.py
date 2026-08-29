@@ -1,6 +1,6 @@
 """
 Memory Analyzers — HoTT Kernel Memory Domain
-Schema Version: 4.0.0-memory
+Schema Version: 4.1.0-memory
 
 Analyzers untuk memory topology.
 Setara dengan performance_analyzers.py + hott_analyzers.py untuk codebase.
@@ -13,6 +13,36 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 REASONING_EDGE_TYPES = {"inferential", "causal"}
 STRUCTURAL_EDGE_TYPES = {"temporal", "consolidation", "derivation", "redundancy"}
 NEUTRAL_EDGE_TYPES = {"semantic", "contradiction"}
+
+
+def _typed_edge_records(
+    memory_graph: Dict[str, Any],
+    edge_type_filter: Optional[Set[str]] = None,
+) -> List[Tuple[str, str, str, str]]:
+    """Return every association 1-cell without collapsing parallel edges."""
+    records = memory_graph.get("edge_records")
+    typed: List[Tuple[str, str, str, str]] = []
+    if isinstance(records, list):
+        for record in records:
+            edge_type = str(record.get("type", "semantic"))
+            if edge_type_filter is not None and edge_type not in edge_type_filter:
+                continue
+            typed.append((
+                str(record.get("from", "")),
+                str(record.get("to", "")),
+                edge_type,
+                str(record.get("association_id", "")),
+            ))
+        return typed
+
+    edge_types = memory_graph.get("edge_types", {})
+    for index, edge in enumerate(memory_graph.get("edges", [])):
+        source, target = edge
+        edge_type = str(edge_types.get((source, target), "semantic"))
+        if edge_type_filter is not None and edge_type not in edge_type_filter:
+            continue
+        typed.append((source, target, edge_type, f"legacy_{index}"))
+    return typed
 
 
 class _UnionFind:
@@ -117,7 +147,7 @@ def analyze_fragmentation(memory_graph: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # ============================================================
-# mem.circular — Circular Reasoning (β₁)
+# mem.circular — Directed Circular-Reasoning Witnesses
 # ============================================================
 
 def analyze_circular(
@@ -125,7 +155,7 @@ def analyze_circular(
     edge_type_filter: Optional[set] = None,
 ) -> Dict[str, Any]:
     """
-    Deteksi circular reasoning patterns (β₁).
+    Deteksi directed circular-reasoning witnesses and report β₁ separately.
     
     Args:
         memory_graph: Graph dari build_memory_graph()
@@ -135,15 +165,8 @@ def analyze_circular(
     """
     findings: List[Dict[str, Any]] = []
     vertices = memory_graph.get("vertices", [])
-    edges = memory_graph.get("edges", [])
-    edge_types_map = memory_graph.get("edge_types", {})
-
-    # Filter edges berdasarkan type jika diminta
-    if edge_type_filter is not None:
-        edges = [
-            e for e in edges
-            if edge_types_map.get(e, "semantic") in edge_type_filter
-        ]
+    typed_edges = _typed_edge_records(memory_graph, edge_type_filter)
+    edges = [(source, target) for source, target, _, _ in typed_edges]
 
     if not edges:
         return {
@@ -153,7 +176,12 @@ def analyze_circular(
                 "total_cycles": 0,
                 "memories_in_cycles": 0,
                 "beta_1": 0,
-                "edge_type_filter": list(edge_type_filter) if edge_type_filter else None,
+                "beta_1_semantics": "underlying undirected multigraph cycle rank",
+                "directed_cycle_witness_count": 0,
+                "directed_cycle_witness_semantics": (
+                    "deduplicated DFS back-edge witnesses; not all elementary cycles"
+                ),
+                "edge_type_filter": sorted(edge_type_filter) if edge_type_filter else None,
             },
         }
 
@@ -197,12 +225,15 @@ def analyze_circular(
         if key not in seen:
             seen.add(key)
             # Tentukan edge types dalam cycle ini
-            cycle_edge_types = set()
+            cycle_edge_types: Set[str] = set()
             for i in range(len(normalized)):
                 src = normalized[i]
                 tgt = normalized[(i + 1) % len(normalized)]
-                etype = edge_types_map.get((src, tgt), "semantic")
-                cycle_edge_types.add(etype)
+                cycle_edge_types.update(
+                    edge_type
+                    for edge_src, edge_tgt, edge_type, _ in typed_edges
+                    if edge_src == src and edge_tgt == tgt
+                )
 
             findings.append({
                 "type": "circular_reasoning",
@@ -219,8 +250,10 @@ def analyze_circular(
             })
 
     # Compute β₁
-    frag_result = analyze_fragmentation(memory_graph)
-    beta_0 = frag_result["summary"]["beta_0"]
+    uf = _UnionFind(vertices)
+    for source, target in edges:
+        uf.union(source, target)
+    beta_0 = len({uf.find(vertex) for vertex in vertices})
     beta_1 = max(0, len(edges) - len(vertices) + beta_0)
 
     findings.sort(key=lambda f: f.get("cycle_length", 0))
@@ -236,7 +269,13 @@ def analyze_circular(
                 mid for f in findings for mid in f.get("memory_ids", [])
             )),
             "beta_1": beta_1,
-            "edge_type_filter": list(edge_type_filter) if edge_type_filter else None,
+            "beta_1_semantics": "underlying undirected multigraph cycle rank",
+            "directed_cycle_witness_count": len(findings),
+            "directed_cycle_witness_semantics": (
+                "deduplicated DFS back-edge witnesses; not all elementary cycles"
+            ),
+            "beta_1_is_not_directed_cycle_count": True,
+            "edge_type_filter": sorted(edge_type_filter) if edge_type_filter else None,
         },
     }
 
@@ -362,15 +401,8 @@ def analyze_manifold(
                           None = semua edges (backward compatible).
     """
     vertices = memory_graph.get("vertices", [])
-    edges = memory_graph.get("edges", [])
-    edge_types_map = memory_graph.get("edge_types", {})
-
-    # Filter edges jika diminta
-    if edge_type_filter is not None:
-        edges = [
-            e for e in edges
-            if edge_types_map.get(e, "semantic") in edge_type_filter
-        ]
+    typed_edges = _typed_edge_records(memory_graph, edge_type_filter)
+    edges = [(source, target) for source, target, _, _ in typed_edges]
 
     n_vertices = len(vertices)
     n_edges = len(edges)
@@ -385,6 +417,7 @@ def analyze_manifold(
                 "betti_numbers": {"beta_0": 0, "beta_1": 0, "beta_2": 0},
                 "average_degree": 0.0,
                 "memory_archetype": "empty",
+                "model": "memory_association_multigraph_1_complex",
             },
             "summary": {},
         }
@@ -452,10 +485,13 @@ def analyze_manifold(
     findings: List[Dict[str, Any]] = []
     if beta_1 > 0:
         findings.append({
-            "type": "circular_patterns",
+            "type": "undirected_cycle_rank",
             "severity": "medium",
             "count": beta_1,
-            "observation": f"{beta_1} independent circular pattern(s) in memory.",
+            "observation": (
+                f"Underlying association multigraph has cycle rank {beta_1}; "
+                "this is not by itself a directed circular-reasoning count."
+            ),
             "invariant": "beta_1",
         })
     if beta_0 > 1:
@@ -482,7 +518,10 @@ def analyze_manifold(
             "memory_archetype": archetype,
             "archetype_description": archetype_desc,
             "archetype_confidence": confidence,
-            "edge_type_filter": list(edge_type_filter) if edge_type_filter else None,
+            "edge_type_filter": sorted(edge_type_filter) if edge_type_filter else None,
+            "model": "memory_association_multigraph_1_complex",
+            "edge_multiplicity_preserved": True,
+            "beta_1_is_not_directed_cycle_count": True,
         },
         "summary": {
             "connected_components": beta_0,
@@ -496,7 +535,7 @@ def analyze_manifold(
 def analyze_betti_breakdown(memory_graph: Dict[str, Any]) -> Dict[str, Any]:
     """
     Hitung β₁ breakdown per kategori edge type.
-    Memberikan interpretasi yang lebih akurat untuk circular reasoning.
+    Pisahkan underlying multigraph cycle rank dari directed reasoning witnesses.
     """
     # Total β₁ (semua edges)
     total_result = analyze_manifold(memory_graph, edge_type_filter=None)
@@ -510,11 +549,28 @@ def analyze_betti_breakdown(memory_graph: Dict[str, Any]) -> Dict[str, Any]:
     structural_result = analyze_manifold(memory_graph, edge_type_filter=STRUCTURAL_EDGE_TYPES)
     beta_1_structural = structural_result["manifold"]["betti_numbers"]["beta_1"]
 
+    directed_reasoning = analyze_circular(
+        memory_graph,
+        edge_type_filter=REASONING_EDGE_TYPES,
+    )
+    directed_reasoning_witnesses = directed_reasoning.get("findings", [])
+    directed_reasoning_count = len(directed_reasoning_witnesses)
+    directed_reasoning_semantics = directed_reasoning.get("summary", {}).get(
+        "directed_cycle_witness_semantics",
+        "deduplicated DFS back-edge witnesses; not all elementary cycles",
+    )
+
     # β₀ tidak terpengaruh edge type filter (connectivity)
     beta_0 = total_result["manifold"]["betti_numbers"]["beta_0"]
 
     return {
         "analyzer": "mem.betti_breakdown",
+        "topological_model": memory_graph.get("model", {
+            "name": "memory_association_multigraph_1_complex",
+            "one_cells": "association records with multiplicity preserved",
+            "betti_semantics": "underlying undirected multigraph cycle rank",
+            "not_directed_cycle_count": True,
+        }),
         "betti_numbers": {
             "beta_0": beta_0,
             "beta_1_total": beta_1_total,
@@ -522,18 +578,28 @@ def analyze_betti_breakdown(memory_graph: Dict[str, Any]) -> Dict[str, Any]:
             "beta_1_structural": beta_1_structural,
         },
         "interpretation": {
-            "true_circular_reasoning": beta_1_reasoning,
+            "true_circular_reasoning": directed_reasoning_count,
+            "directed_reasoning_cycle_witness_count": directed_reasoning_count,
+            "directed_reasoning_cycle_witnesses": directed_reasoning_witnesses,
+            "directed_reasoning_cycle_witness_semantics": directed_reasoning_semantics,
+            "underlying_reasoning_cycle_rank": beta_1_reasoning,
             "structural_artifacts": beta_1_structural,
+            "beta_1_is_not_directed_cycle_count": True,
             "assessment": (
-                "No true circular reasoning detected"
-                if beta_1_reasoning == 0
-                else f"{beta_1_reasoning} true circular reasoning pattern(s) detected"
+                "No directed circular-reasoning witness detected"
+                if directed_reasoning_count == 0
+                else (
+                    f"{directed_reasoning_count} directed circular-reasoning "
+                    "witness(es) detected"
+                )
             ),
         },
         "summary": {
             "beta_1_total": beta_1_total,
             "beta_1_reasoning": beta_1_reasoning,
             "beta_1_structural": beta_1_structural,
+            "directed_reasoning_cycle_witness_count": directed_reasoning_count,
+            "directed_reasoning_cycle_witness_semantics": directed_reasoning_semantics,
             "reasoning_percentage": round(
                 beta_1_reasoning / max(1, beta_1_total) * 100, 1
             ),

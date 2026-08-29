@@ -2297,7 +2297,8 @@ def test_f36_analyzer_evidence_cache():
 def test_f31_memory_topology_betti():
     name = "F31"
     from memory.graph import build_memory_graph_from_data
-    from memory.analyzers import analyze_betti_breakdown
+    from memory.analyzers import analyze_betti_breakdown, analyze_circular
+    from memory.synthesizer import generate_memory_steering_signals
 
     # Test case 1: In-memory memory graph
     memories = [
@@ -2316,6 +2317,11 @@ def test_f31_memory_topology_betti():
     graph = build_memory_graph_from_data(memories, associations)
     expect("edge_types" in graph, f"{name}: edge_types must be in memory graph")
     expect(graph["summary"]["total_memories"] == 4, f"{name}: 4 memories expected")
+    expect(
+        graph.get("model", {}).get("name")
+        == "memory_association_multigraph_1_complex",
+        f"{name}: memory graph model harus eksplisit",
+    )
 
     # Test Betti breakdown
     breakdown = analyze_betti_breakdown(graph)
@@ -2324,6 +2330,499 @@ def test_f31_memory_topology_betti():
     expect(betti.get("beta_1_total") == 1, f"{name}: beta_1_total should be 1")
     expect(betti.get("beta_1_reasoning") == 0, f"{name}: beta_1_reasoning should be 0 for temporal loop")
     expect(betti.get("beta_1_structural") == 1, f"{name}: beta_1_structural should be 1 for temporal loop")
+
+    # Parallel reasoning associations are distinct 1-cells. They increase the
+    # undirected cycle rank but do not form a directed circular-reasoning path.
+    parallel_graph = build_memory_graph_from_data(
+        [
+            {"id": "p1", "type": "semantic"},
+            {"id": "p2", "type": "semantic"},
+        ],
+        [
+            {"id": "pa1", "from": "p1", "to": "p2", "type": "inferential"},
+            {"id": "pa2", "from": "p1", "to": "p2", "type": "causal"},
+        ],
+    )
+    expect(len(parallel_graph.get("edges", [])) == 2, f"{name}: edge multiplicity harus terjaga")
+    expect(
+        parallel_graph.get("summary", {}).get("by_edge_type")
+        == {"inferential": 1, "causal": 1},
+        f"{name}: parallel edge types tidak boleh saling menimpa",
+    )
+    parallel_breakdown = analyze_betti_breakdown(parallel_graph)
+    expect(
+        parallel_breakdown.get("topological_model", {}).get("name")
+        == "memory_association_multigraph_1_complex",
+        f"{name}: breakdown harus membawa model ke consumer/LLM",
+    )
+    expect(
+        parallel_breakdown.get("betti_numbers", {}).get("beta_1_reasoning") == 1,
+        f"{name}: parallel 1-cells harus memberi reasoning cycle rank 1",
+    )
+    expect(
+        parallel_breakdown.get("interpretation", {}).get(
+            "directed_reasoning_cycle_witness_count"
+        ) == 0,
+        f"{name}: parallel edge searah bukan directed circular reasoning",
+    )
+    parallel_signals = generate_memory_steering_signals(
+        {
+            "memory_archetype": "memory_sparse_cyclic",
+            "betti_numbers": {"beta_0": 1, "beta_1": 1, "beta_2": 0},
+        },
+        {"topology_changed": False, "interpretation": "none"},
+        0.8,
+        directed_reasoning_cycle_witness_count=0,
+    )
+    expect(
+        "association_cycle_rank_present" in parallel_signals.get("attention_priorities", []),
+        f"{name}: steering harus membawa cycle rank sebagai sinyal struktur",
+    )
+    expect(
+        "directed_circular_reasoning_witness_present"
+        not in parallel_signals.get("attention_priorities", []),
+        f"{name}: steering tidak boleh mengubah parallel edge menjadi reasoning loop",
+    )
+
+    directed_graph = build_memory_graph_from_data(
+        [
+            {"id": "r1", "type": "semantic"},
+            {"id": "r2", "type": "semantic"},
+            {"id": "r3", "type": "semantic"},
+        ],
+        [
+            {"id": "ra1", "from": "r1", "to": "r2", "type": "inferential"},
+            {"id": "ra2", "from": "r2", "to": "r3", "type": "causal"},
+            {"id": "ra3", "from": "r3", "to": "r1", "type": "inferential"},
+        ],
+    )
+    directed = analyze_circular(directed_graph, edge_type_filter={"inferential", "causal"})
+    expect(
+        directed.get("summary", {}).get("directed_cycle_witness_count") == 1,
+        f"{name}: directed reasoning loop harus punya path witness",
+    )
+    expect(
+        directed.get("summary", {}).get("beta_1") == 1,
+        f"{name}: directed loop harus tetap konsisten dengan cycle rank",
+    )
+    expect(
+        "not all elementary cycles"
+        in directed.get("summary", {}).get("directed_cycle_witness_semantics", ""),
+        f"{name}: batas enumerasi witness harus eksplisit",
+    )
+    directed_signals = generate_memory_steering_signals(
+        {
+            "memory_archetype": "memory_sparse_cyclic",
+            "betti_numbers": {"beta_0": 1, "beta_1": 1, "beta_2": 0},
+        },
+        {"topology_changed": False, "interpretation": "none"},
+        0.8,
+        directed_reasoning_cycle_witness_count=1,
+    )
+    expect(
+        "directed_circular_reasoning_witness_present"
+        in directed_signals.get("attention_priorities", []),
+        f"{name}: directed witness harus mencapai steering signal",
+    )
+
+
+def _run_scoped_kernel(
+    state_dir: Path,
+    project_root: Path,
+    *args: str,
+    expect_success: bool = True,
+):
+    """Run one isolated CLI invocation against a project-scoped runtime."""
+    env = dict(os.environ)
+    env.update({
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "AI_STUDIO_STATE_DIR": str(state_dir),
+        "AI_STUDIO_PROJECT_ROOT": str(project_root),
+    })
+    completed = subprocess.run(
+        [sys.executable, str(ROOT / "hott_kernel.py"), *args],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        expect(False, f"SCOPED KERNEL: {' '.join(args)} bukan JSON valid: {exc}")
+        return completed, {}
+    if expect_success:
+        expect(
+            completed.returncode == 0 and not payload.get("error"),
+            (
+                f"SCOPED KERNEL: {' '.join(args)} gagal "
+                f"({completed.returncode}): {payload.get('error') or completed.stderr.strip()}"
+            ),
+        )
+    return completed, payload
+
+
+def test_f37_memory_runtime_integrity():
+    """Project scope, deduplication, locking, recovery, and permissions."""
+    name = "F37"
+    with tempfile.TemporaryDirectory(prefix="ai-studio-memory-runtime-") as tmp:
+        root = Path(tmp)
+        state_dir = root / "state"
+        project_a = root / "project-a"
+        project_b = root / "project-b"
+        project_race = root / "project-race"
+        project_broken = root / "project-broken"
+        for project in (project_a, project_b, project_race, project_broken):
+            project.mkdir(parents=True)
+        (project_a / "app.ts").write_text("export const projectA = true;\n", encoding="utf-8")
+        (project_b / "app.ts").write_text("export const projectB = true;\n", encoding="utf-8")
+
+        # State location alone must not collapse different scan roots into one scope.
+        auto_env = dict(os.environ)
+        auto_env.update({
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "AI_STUDIO_STATE_DIR": str(state_dir),
+        })
+        auto_env.pop("AI_STUDIO_PROJECT_ROOT", None)
+        auto_env.pop("AI_STUDIO_MEMORY_SCOPE", None)
+        auto_scope_ids = []
+        for project in (project_a, project_b):
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "hott_kernel.py"),
+                    "context", "project app", str(project),
+                    "--target", "app.ts", "--budget-tokens", "256", "--output", "prompt",
+                ],
+                cwd=ROOT,
+                env=auto_env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            payload = json.loads(completed.stdout)
+            expect(completed.returncode == 0, f"{name}: auto-scope context harus sukses")
+            auto_scope_ids.append(
+                payload.get("provenance", {}).get("memory_scope", {}).get("scope_id")
+            )
+        expect(
+            all(auto_scope_ids) and len(set(auto_scope_ids)) == 2,
+            f"{name}: scan root berbeda harus otomatis mendapat memory scope berbeda",
+        )
+
+        _, stored_a = _run_scoped_kernel(
+            state_dir,
+            project_a,
+            "memory", "store", "episodic",
+            "Project A evidence for src/services/cache.service.ts",
+            "--source", "f37-project-a", "--tags", "cache,src.services",
+        )
+        _, stored_b = _run_scoped_kernel(
+            state_dir,
+            project_b,
+            "memory", "store", "episodic",
+            "Project B evidence for src/services/cache.service.ts",
+            "--source", "f37-project-b", "--tags", "cache,src.services",
+        )
+        expect(stored_a.get("status") == "stored", f"{name}: project A harus tersimpan")
+        expect(stored_b.get("status") == "stored", f"{name}: project B harus tersimpan")
+
+        _, context_a = _run_scoped_kernel(
+            state_dir,
+            project_a,
+            "xcontext", "src/services/cache.service.ts",
+        )
+        contents_a = [item.get("content", "") for item in context_a.get("memories", [])]
+        expect(any("Project A" in item for item in contents_a), f"{name}: scope A harus recall A")
+        expect(not any("Project B" in item for item in contents_a), f"{name}: scope A tidak boleh bocor ke B")
+        expect(
+            context_a.get("memory_scope", {}).get("scope_id"),
+            f"{name}: xcontext harus membawa provenance scope",
+        )
+
+        # Direct association command must not bypass directed-cycle safety.
+        _, second_a = _run_scoped_kernel(
+            state_dir,
+            project_a,
+            "memory", "store", "semantic", "Project A second reasoning node",
+            "--source", "f37-cycle-safety",
+        )
+        first_a_id = stored_a.get("memory", {}).get("id")
+        second_a_id = second_a.get("memory", {}).get("id")
+        _, forward_association = _run_scoped_kernel(
+            state_dir,
+            project_a,
+            "memory", "associate", first_a_id, second_a_id, "inferential",
+        )
+        expect(
+            forward_association.get("status") == "associated",
+            f"{name}: reasoning edge acyclic harus diterima",
+        )
+        completed, rejected_reverse = _run_scoped_kernel(
+            state_dir,
+            project_a,
+            "memory", "associate", second_a_id, first_a_id, "causal",
+            expect_success=False,
+        )
+        expect(completed.returncode == 2, f"{name}: direct reasoning loop harus exit 2")
+        expect(
+            rejected_reverse.get("error_code") == "would_create_reasoning_cycle",
+            f"{name}: direct association harus memakai safety error stabil",
+        )
+        _, memory_summary = _run_scoped_kernel(
+            state_dir,
+            project_a,
+            "memory", "analyze", "--output", "summary",
+        )
+        expect(
+            memory_summary.get("topological_model", {}).get("name")
+            == "memory_association_multigraph_1_complex",
+            f"{name}: CLI summary harus membawa model memory graph",
+        )
+        expect(
+            memory_summary.get("cycle_semantics", {}).get(
+                "directed_reasoning_cycle_witness_count"
+            ) == 0,
+            f"{name}: edge reasoning acyclic tidak boleh dilabeli circular",
+        )
+
+        # Identical analyzer evidence must be observed again, not duplicated.
+        fixture_project = ROOT / "fixtures_min/f20_cache_audit/project"
+        _, first = _run_scoped_kernel(
+            state_dir,
+            fixture_project,
+            "xanalyze", str(fixture_project), "--output", "summary",
+        )
+        _, second = _run_scoped_kernel(
+            state_dir,
+            fixture_project,
+            "xanalyze", str(fixture_project), "--output", "summary",
+        )
+        first_store = first.get("memory_store_result", {})
+        second_store = second.get("memory_store_result", {})
+        expect(first_store.get("stored_count", 0) > 0, f"{name}: analisis pertama harus store evidence")
+        expect(second_store.get("stored_count") == 0, f"{name}: analisis identik tidak boleh duplicate")
+        expect(
+            second_store.get("reused_count") == first_store.get("stored_count"),
+            f"{name}: evidence identik harus direuse seluruhnya",
+        )
+        _, deduplicated = _run_scoped_kernel(
+            state_dir,
+            fixture_project,
+            "memory", "recall", "--limit", "100",
+        )
+        expect(
+            deduplicated.get("count") == first_store.get("stored_count"),
+            f"{name}: total node harus tetap sama setelah analisis identik",
+        )
+        expect(
+            all(
+                item.get("context", {}).get("observation_count") == 2
+                for item in deduplicated.get("results", [])
+            ),
+            f"{name}: re-observation harus menaikkan counter node yang sama",
+        )
+
+        # All successful concurrent writers must survive the read-modify-write cycle.
+        env = dict(os.environ)
+        env.update({
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "AI_STUDIO_STATE_DIR": str(state_dir),
+            "AI_STUDIO_PROJECT_ROOT": str(project_race),
+        })
+        processes = [
+            subprocess.Popen(
+                [
+                    sys.executable,
+                    str(ROOT / "hott_kernel.py"),
+                    "memory", "store", "episodic", f"parallel write {index:02d}",
+                    "--source", "f37-race", "--tags", "concurrency",
+                ],
+                cwd=ROOT,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            for index in range(16)
+        ]
+        for process in processes:
+            stdout, stderr = process.communicate(timeout=30)
+            expect(process.returncode == 0, f"{name}: parallel writer gagal: {stderr or stdout}")
+        _, race_stats = _run_scoped_kernel(state_dir, project_race, "memory", "stats")
+        expect(race_stats.get("total_memories") == 16, f"{name}: 16/16 parallel writes harus persisten")
+
+        runtime = race_stats.get("runtime", {})
+        store_path = Path(runtime.get("store_path", ""))
+        expect(store_path.is_file(), f"{name}: runtime harus mengekspos store path aktual")
+        if os.name != "nt":
+            expect(store_path.stat().st_mode & 0o777 == 0o600, f"{name}: store permission harus 0600")
+
+        # One more valid write creates a last-known-good backup. Corruption must recover.
+        _run_scoped_kernel(
+            state_dir,
+            project_race,
+            "memory", "store", "episodic", "backup checkpoint", "--source", "f37-recovery",
+        )
+        store_path.write_text("{corrupt-json", encoding="utf-8")
+        _, recovered = _run_scoped_kernel(state_dir, project_race, "memory", "stats")
+        expect(recovered.get("total_memories") == 16, f"{name}: backup harus memulihkan last-known-good state")
+        expect(
+            recovered.get("runtime", {}).get("recovery", {}).get("status") == "recovered_from_backup",
+            f"{name}: recovery harus terlihat dalam provenance",
+        )
+
+        # Missing primary with a valid backup is a recoverable interrupted-state case.
+        store_path.unlink()
+        _, missing_primary_recovered = _run_scoped_kernel(
+            state_dir, project_race, "memory", "stats"
+        )
+        expect(
+            missing_primary_recovered.get("total_memories") == 16,
+            f"{name}: primary hilang harus dipulihkan dari backup valid",
+        )
+        expect(
+            missing_primary_recovered.get("runtime", {}).get("recovery", {}).get("status")
+            == "recovered_missing_primary_from_backup",
+            f"{name}: recovery primary hilang harus terlihat dalam provenance",
+        )
+
+        # Missing primary plus invalid backup must block instead of becoming empty.
+        backup_path = Path(f"{store_path}.bak")
+        backup_path.write_text("{invalid-backup", encoding="utf-8")
+        store_path.unlink()
+        completed, missing_and_broken = _run_scoped_kernel(
+            state_dir,
+            project_race,
+            "memory", "stats",
+            expect_success=False,
+        )
+        expect(completed.returncode == 2, f"{name}: missing+invalid harus exit 2")
+        expect(
+            missing_and_broken.get("error_code") == "memory_store_corrupt",
+            f"{name}: missing+invalid backup harus menjadi stop condition",
+        )
+        expect(
+            missing_and_broken.get("primary_error") == "primary_missing",
+            f"{name}: provenance harus membedakan primary hilang",
+        )
+
+        # Without a valid backup, corruption must block both reads and writes.
+        _, first_broken = _run_scoped_kernel(
+            state_dir,
+            project_broken,
+            "memory", "store", "episodic", "only checkpoint", "--source", "f37-broken",
+        )
+        broken_scope = first_broken.get("memory_scope", {})
+        if not broken_scope:
+            _, broken_stats = _run_scoped_kernel(state_dir, project_broken, "memory", "stats")
+            broken_scope = broken_stats.get("runtime", {})
+        broken_path = Path(broken_scope.get("store_path", ""))
+        broken_path.write_text("{unrecoverable", encoding="utf-8")
+        completed, broken_read = _run_scoped_kernel(
+            state_dir,
+            project_broken,
+            "memory", "stats",
+            expect_success=False,
+        )
+        expect(completed.returncode == 2, f"{name}: corrupt tanpa backup harus exit 2")
+        expect(
+            broken_read.get("error_code") == "memory_store_corrupt",
+            f"{name}: corrupt tanpa backup harus punya error code stabil",
+        )
+        completed, broken_write = _run_scoped_kernel(
+            state_dir,
+            project_broken,
+            "memory", "store", "episodic", "must not overwrite",
+            expect_success=False,
+        )
+        expect(completed.returncode == 2, f"{name}: write setelah corrupt harus tetap diblok")
+        expect(
+            broken_write.get("error_code") == "memory_store_corrupt",
+            f"{name}: write tidak boleh mengganti corrupt store dengan state kosong",
+        )
+        expect(
+            broken_path.read_text(encoding="utf-8") == "{unrecoverable",
+            f"{name}: primary corrupt harus dipertahankan sampai perbaikan eksplisit",
+        )
+
+
+def test_f38_memory_augmented_context_budget():
+    """The primary context command must include scoped memory within its hard budget."""
+    name = "F38"
+    with tempfile.TemporaryDirectory(prefix="ai-studio-memory-context-") as tmp:
+        root = Path(tmp)
+        state_dir = root / "state"
+        project = ROOT / "fixtures_min/f16_file_brief/project"
+        target = "src/app.ts"
+        memory_text = "Historical invariant: src/app.ts requires deterministic startup ordering."
+        _run_scoped_kernel(
+            state_dir,
+            project,
+            "memory", "store", "semantic", memory_text,
+            "--source", "f38", "--importance", "0.95", "--tags", "startup,src",
+        )
+        _, result = _run_scoped_kernel(
+            state_dir,
+            project,
+            "context", "historical startup invariant", str(project),
+            "--target", target,
+            "--budget-tokens", "400",
+            "--output", "prompt",
+        )
+        memory_context = result.get("memory_context", {})
+        expect(memory_context.get("selected_count") == 1, f"{name}: satu memory evidence harus dipilih")
+        expect(memory_text in result.get("context_block", ""), f"{name}: isi memory harus mencapai prompt LLM")
+        expect(
+            "[PROJECT MEMORY EVIDENCE]" in result.get("context_block", ""),
+            f"{name}: memory harus dibedakan eksplisit dari source evidence",
+        )
+        expect(result.get("budget", {}).get("within_budget") is True, f"{name}: hard budget harus terjaga")
+        expect(
+            any(
+                str(path).replace("\\", "/").endswith(target)
+                for path in result.get("selection", {}).get("selected_paths", [])
+            ),
+            f"{name}: memory evidence tidak boleh menggusur explicit source target",
+        )
+        expect(
+            result.get("provenance", {}).get("memory_scope", {}).get("scope_id"),
+            f"{name}: prompt harus membawa memory-scope provenance",
+        )
+        expect(
+            result.get("provenance", {}).get("memory_retrieval", {}).get("claim_boundary")
+            == "deterministic lexical-and-path retrieval; not semantic embedding proof",
+            f"{name}: batas klaim retrieval harus eksplisit",
+        )
+
+        oversized = "Oversized sentinel historical evidence: " + ("x" * 2000)
+        _run_scoped_kernel(
+            state_dir,
+            project,
+            "memory", "store", "semantic", oversized,
+            "--source", "f38-large", "--importance", "0.99", "--tags", "sentinel",
+        )
+        _, bounded = _run_scoped_kernel(
+            state_dir,
+            project,
+            "context", "oversized sentinel", str(project),
+            "--target", target, "--budget-tokens", "400", "--output", "prompt",
+        )
+        selected_memory = bounded.get("memory_context", {}).get("selected", [])
+        expect(selected_memory, f"{name}: memory panjang tetap harus punya bounded witness")
+        expect(
+            selected_memory[0].get("content_truncated") is True,
+            f"{name}: truncation memory harus transparan",
+        )
+        expect(
+            oversized not in bounded.get("context_block", ""),
+            f"{name}: full memory tidak boleh membypass context budget",
+        )
+        expect(
+            bounded.get("budget", {}).get("within_budget") is True,
+            f"{name}: memory panjang tetap harus mematuhi hard budget",
+        )
 
 
 def _run_kernel(*args):
@@ -2492,6 +2991,20 @@ def test_kernel_cli_contract():
         "cache_mode" in help_payload.get("global_options", {}),
         "CLI: help harus memuat cache mode global",
     )
+    for option in ("memory_project_root", "memory_scope", "memory_state_dir"):
+        expect(
+            option in help_payload.get("global_options", {}),
+            f"CLI: help harus memuat {option}",
+        )
+
+    completed, invalid_memory_type = run_raw(
+        "memory", "store", "bukan-tipe", "invalid memory",
+    )
+    expect(completed.returncode == 2, "CLI: memory input error harus exit code 2")
+    expect(
+        "Invalid memory type" in invalid_memory_type.get("error", ""),
+        "CLI: memory input error harus terlihat untuk Bash",
+    )
 
     project = "fixtures_min/f16_file_brief/project"
     completed, invalid_analyzer = run_raw(
@@ -2644,6 +3157,8 @@ def main():
         test_f34_context_optimizer,
         test_f35_incremental_graph_cache,
         test_f36_analyzer_evidence_cache,
+        test_f37_memory_runtime_integrity,
+        test_f38_memory_augmented_context_budget,
         test_kernel_wiring_smoke,
         test_kernel_cli_contract,
     ]
@@ -2660,7 +3175,7 @@ def main():
             print(f"- {failure}")
         sys.exit(1)
 
-    print("PASS: 33 fixture minimal + 2 portable integration smoke aman")
+    print("PASS: 35 fixture minimal + 2 portable integration smoke aman")
 
 
 if __name__ == "__main__":

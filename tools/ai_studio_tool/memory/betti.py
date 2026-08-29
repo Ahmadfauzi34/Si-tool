@@ -1,6 +1,6 @@
 """
 Edge-Type-Aware Betti Breakdown — HoTT Memory Domain
-Schema Version: 4.0.0-memory
+Schema Version: 4.1.0-memory
 """
 
 from memory.analyzers import (

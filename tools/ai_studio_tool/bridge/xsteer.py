@@ -1,11 +1,11 @@
 """
 Unified Cross-Domain Steering — HoTT Kernel Bridge Domain
-Schema Version: 4.0.0-memory
+Schema Version: 4.1.0-memory
 """
 
 from typing import Any, Dict, List, Optional
 
-SCHEMA_VERSION = "4.0.0-memory"
+SCHEMA_VERSION = "4.1.0-memory"
 
 
 def cross_domain_steer(
@@ -83,6 +83,7 @@ def cross_domain_steer(
             compute_memory_fingerprint, load_memory_baseline,
             detect_memory_drift, generate_memory_steering_signals,
         )
+        from memory.runtime import memory_runtime_provenance
     except ImportError:
         try:
             from memory_graph import build_memory_graph
@@ -91,6 +92,7 @@ def cross_domain_steer(
                 compute_memory_fingerprint, load_memory_baseline,
                 detect_memory_drift, generate_memory_steering_signals,
             )
+            from memory_runtime import memory_runtime_provenance
         except ImportError:
             result["memory_steering"] = {"error": "memory modules not available"}
             return result
@@ -115,7 +117,18 @@ def cross_domain_steer(
     mem_fingerprint = compute_memory_fingerprint(manifold_data, memory_graph["summary"])
     mem_baseline = load_memory_baseline()
     mem_drift = detect_memory_drift(mem_fingerprint, mem_baseline)
-    mem_signals = generate_memory_steering_signals(mem_fingerprint, mem_drift, mem_health)
+    directed_reasoning_count = (
+        mem_analyzer_output.get("results", {})
+        .get("mem.betti_breakdown", {})
+        .get("summary", {})
+        .get("directed_reasoning_cycle_witness_count", 0)
+    )
+    mem_signals = generate_memory_steering_signals(
+        mem_fingerprint,
+        mem_drift,
+        mem_health,
+        directed_reasoning_cycle_witness_count=directed_reasoning_count,
+    )
 
     result["memory_steering"] = {
         "archetype": mem_fingerprint.get("memory_archetype", "unknown"),
@@ -124,6 +137,7 @@ def cross_domain_steer(
         "budget": mem_signals.get("reasoning_budget", "medium"),
         "drift": mem_drift.get("interpretation", "no_baseline"),
     }
+    result["memory_scope"] = memory_runtime_provenance()
 
     # Synthesize Cross-Domain Signal
     cb_strat = result["codebase_steering"]["strategy"]

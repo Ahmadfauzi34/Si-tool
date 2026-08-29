@@ -24,7 +24,7 @@ except ImportError:
     from shared_graph import graph_content_signature
 
 
-CONTEXT_MODEL = "query_directed_quotient_context_v1"
+CONTEXT_MODEL = "query_directed_quotient_context_v2_memory"
 CHARS_PER_TOKEN_ESTIMATE = 4
 DEFAULT_BUDGET_TOKENS = 1200
 MIN_BUDGET_TOKENS = 256
@@ -33,6 +33,8 @@ DEFAULT_MAX_HOPS = 2
 MAX_HOPS = 5
 MAX_SEMANTIC_SEEDS = 8
 MAX_EXCERPT_LINES = 12
+MAX_MEMORY_CONTEXT_CHARS = 1200
+MAX_MEMORY_CONTENT_CHARS = 480
 
 _TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9]*")
 _CAMEL_RE = re.compile(r"([a-z0-9])([A-Z])")
@@ -361,6 +363,68 @@ def _render_card(profile: Dict[str, Any], detail: str, char_cap: int) -> str:
     return rendered
 
 
+def _render_memory_block(
+    memory_context: Optional[Dict[str, Any]],
+    char_cap: int,
+) -> Tuple[str, List[Dict[str, Any]]]:
+    """Render scoped memory as bounded, explicitly non-authoritative evidence."""
+    if not memory_context or not memory_context.get("memories") or char_cap <= 0:
+        return "", []
+
+    scope = memory_context.get("memory_scope", {})
+    retrieval = memory_context.get("retrieval", {})
+    lines = [
+        "[PROJECT MEMORY EVIDENCE]",
+        (
+            f"scope={scope.get('scope_id', 'unknown')}; "
+            f"retrieval={retrieval.get('model', 'unknown')}"
+        ),
+        f"claim_boundary={retrieval.get('claim_boundary', 'historical observation only')}",
+        "trust=observational context; verify against current source before acting.",
+    ]
+    included: List[Dict[str, Any]] = []
+
+    for memory in memory_context.get("memories", []):
+        raw_content = " ".join(str(memory.get("content", "")).split())
+        source = " ".join(str(memory.get("source", "unknown")).split())[:160]
+        tags = ",".join(str(tag)[:40] for tag in memory.get("tags", [])[:6]) or "-"
+        record_prefix = (
+            f"MEMORY {memory.get('id', 'unknown')} | type={memory.get('type', 'unknown')} | "
+            f"importance={float(memory.get('importance', 0.0)):.2f} | "
+            f"observations={int(memory.get('observation_count', 1))} | "
+            f"retrieval_score={memory.get('retrieval_match', {}).get('score', '-')}\n"
+            f"source={source}; file={memory.get('file') or '-'}; tags={tags}; "
+            f"content_hash={memory.get('content_sha256', 'unknown')}\n"
+            "content="
+        )
+        base_candidate = "\n".join(lines + [record_prefix]) + "\n"
+        available_content_chars = min(
+            MAX_MEMORY_CONTENT_CHARS,
+            max(0, char_cap - len(base_candidate)),
+        )
+        if available_content_chars <= 3:
+            break
+        content_truncated = len(raw_content) > available_content_chars
+        content = (
+            raw_content[: available_content_chars - 3].rstrip() + "..."
+            if content_truncated
+            else raw_content
+        )
+        record = record_prefix + content
+        candidate = "\n".join(lines + [record]) + "\n"
+        if len(candidate) > char_cap:
+            break
+        lines.append(record)
+        included_view = dict(memory)
+        included_view["content"] = content
+        included_view["content_truncated"] = content_truncated
+        included.append(included_view)
+
+    if not included:
+        return "", []
+    return "\n".join(lines) + "\n", included
+
+
 def build_context_pack(
     shared_graph: Dict[str, Any],
     query: str,
@@ -369,6 +433,7 @@ def build_context_pack(
     max_hops: int = DEFAULT_MAX_HOPS,
     detail: str = "source",
     analyzer_output: Optional[Dict[str, Any]] = None,
+    memory_context: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Project measured graph evidence into a deterministic prompt-sized pack."""
     vertices = sorted(shared_graph.get("vertices", []))
@@ -551,13 +616,26 @@ def build_context_pack(
         f"V={len(vertices)}; E={len(shared_graph.get('edges', []))}\n"
         f"selection={selection_mode}; hops<={max_hops}; "
         "score=target_bonus+0.45L+0.25P+0.20C+0.10F\n"
-        "scope=static TS/JS graph evidence; excerpts may be partial; findings are observations.\n"
+        "scope=static TS/JS graph plus project-scoped historical observations; "
+        "excerpts may be partial; findings and memories are observations.\n"
     )
+    footer_reserve = 110
+    memory_cap = min(
+        MAX_MEMORY_CONTEXT_CHARS,
+        max(640, char_budget // 2),
+        max(0, char_budget - len(header) - footer_reserve - 260),
+    )
+    memory_block, included_memories = _render_memory_block(memory_context, memory_cap)
     parts = [header]
+    if memory_block:
+        parts.append(memory_block)
     selected: List[Dict[str, Any]] = []
     allocation_divisor = max(1, min(len(profiles), 4))
-    per_card_cap = max(260, min(1200, char_budget // allocation_divisor))
-    footer_reserve = 110
+    card_budget = max(
+        260,
+        char_budget - len(header) - len(memory_block) - footer_reserve,
+    )
+    per_card_cap = max(260, min(1200, card_budget // allocation_divisor))
     for profile in profiles:
         card = _render_card(profile, detail, per_card_cap)
         current_length = len("\n".join(parts))
@@ -596,7 +674,10 @@ def build_context_pack(
         "available": True,
         "model": {
             "name": CONTEXT_MODEL,
-            "purpose": "deterministic query-directed projection of measured codebase evidence",
+            "purpose": (
+                "deterministic query-directed projection of measured codebase evidence "
+                "and scoped historical observations"
+            ),
             "score_formula": "explicit_target_bonus + 0.45*L + 0.25*P + 0.20*C + 0.10*F",
             "terms": {
                 "L": "max(path overlap, 0.9*symbol overlap, 0.8*finding overlap)",
@@ -606,7 +687,8 @@ def build_context_pack(
             },
             "claim_boundary": (
                 "Ranking is deterministic context selection, not a proof that omitted files "
-                "are irrelevant and not a model-specific token count."
+                "are irrelevant and not a model-specific token count. Memory evidence is "
+                "non-authoritative until verified against current source."
             ),
         },
         "query": query,
@@ -644,9 +726,22 @@ def build_context_pack(
             "omitted_file_count": max(0, len(vertices) - len(selected)),
             "analyzers_failed": analyzer_output.get("analyzers_failed", 0),
             "analyzer_errors": analyzer_output.get("errors", {}),
+            "memory_scope": (memory_context or {}).get("memory_scope", {}),
+            "memory_retrieval": (memory_context or {}).get("retrieval", {}),
+            "memory_evidence_retrieved": int(
+                (memory_context or {}).get("selected_count", 0)
+            ),
+            "memory_evidence_included": len(included_memories),
         },
         "quotient_graph": _build_quotient(shared_graph, selected_paths),
         "selected_files": selected,
+        "memory_context": {
+            "selected_count": len(included_memories),
+            "retrieved_count": int((memory_context or {}).get("selected_count", 0)),
+            "memories": included_memories,
+            "memory_scope": (memory_context or {}).get("memory_scope", {}),
+            "retrieval": (memory_context or {}).get("retrieval", {}),
+        },
         "context_block": context_block,
     }
 
@@ -659,4 +754,5 @@ __all__ = [
     "MIN_BUDGET_TOKENS",
     "MAX_BUDGET_TOKENS",
     "MAX_HOPS",
+    "MAX_MEMORY_CONTEXT_CHARS",
 ]

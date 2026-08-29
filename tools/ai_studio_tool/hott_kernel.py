@@ -171,7 +171,7 @@ try:
         check_consolidation_trigger,
     )
     from bridge.xsteer import cross_domain_steer
-    from bridge.xcontext import get_memory_context_for_file
+    from bridge.xcontext import get_memory_context_for_file, get_memory_evidence
     CROSS_DOMAIN_AVAILABLE = True
 except ImportError:
     try:
@@ -181,10 +181,27 @@ except ImportError:
             check_consolidation_trigger,
             cross_domain_steer,
             get_memory_context_for_file,
+            get_memory_evidence,
         )
         CROSS_DOMAIN_AVAILABLE = True
     except ImportError:
         CROSS_DOMAIN_AVAILABLE = False
+
+try:
+    from memory.runtime import (
+        MemoryStateError,
+        configure_memory_runtime,
+        memory_runtime_provenance,
+    )
+    MEMORY_RUNTIME_AVAILABLE = True
+except ImportError:
+    MEMORY_RUNTIME_AVAILABLE = False
+
+    class MemoryStateError(RuntimeError):
+        """Fallback exception type when the optional memory runtime is absent."""
+
+        error_code = "memory_state_error"
+        details: Dict[str, Any] = {}
 
 try:
     from context.fibration import (
@@ -222,6 +239,13 @@ _ACTIVE_GRAPH_CACHE_MODE = os.environ.get(
     "AI_STUDIO_GRAPH_CACHE",
     "auto",
 ).strip().lower()
+_MEMORY_SCOPE_EXPLICIT = any(
+    os.environ.get(name)
+    for name in (
+        "AI_STUDIO_PROJECT_ROOT",
+        "AI_STUDIO_MEMORY_SCOPE",
+    )
+)
 
 
 def _utc_timestamp() -> str:
@@ -237,6 +261,31 @@ def _kernel_error(error_code: str, message: str, **details: Any) -> Dict[str, An
         "error_code": error_code,
         **details,
     }
+
+
+def _infer_project_root(scan_root: str) -> str:
+    """Infer the nearest project boundary without coupling to Angular names."""
+    scan_path = os.path.abspath(scan_root)
+    candidate = scan_path if os.path.isdir(scan_path) else os.path.dirname(scan_path)
+    markers = ("package.json", "tsconfig.json", "pyproject.toml", ".git")
+    current = candidate
+    for _ in range(6):
+        if any(os.path.exists(os.path.join(current, marker)) for marker in markers):
+            return current
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        current = parent
+    if os.path.basename(candidate).lower() in ("src", "source"):
+        return os.path.dirname(candidate)
+    return candidate
+
+
+def _bind_memory_scope_to_scan(scan_root: str) -> None:
+    """Keep scan-backed memory isolated even when the CLI runs outside a project."""
+    if not MEMORY_RUNTIME_AVAILABLE or _MEMORY_SCOPE_EXPLICIT:
+        return
+    configure_memory_runtime(project_root=_infer_project_root(scan_root))
 
 
 def _validate_scan_root(scan_root: str) -> Optional[Dict[str, Any]]:
@@ -462,6 +511,20 @@ def _emit_cli_result(result: Dict[str, Any]) -> None:
         raise SystemExit(3)
 
 
+def _exception_result(exc: Exception) -> Dict[str, Any]:
+    """Preserve typed durable-state failures for the top-level CLI boundary."""
+    if isinstance(exc, MemoryStateError):
+        raise exc
+    error_code = getattr(exc, "error_code", None)
+    if error_code:
+        return _kernel_error(
+            str(error_code),
+            str(exc),
+            **getattr(exc, "details", {}),
+        )
+    return {"error": str(exc)}
+
+
 def kernel_memory_store(
     memory_type: str,
     content: str,
@@ -484,13 +547,14 @@ def kernel_memory_store(
             tags=tag_list,
         )
         return {
-            "schema_version": "4.0.0-memory",
+            "schema_version": "4.1.0-memory",
             "mode": "memory_store",
             "status": "stored",
             "memory": memory,
+            "memory_scope": memory_runtime_provenance() if MEMORY_RUNTIME_AVAILABLE else {},
         }
     except Exception as exc:
-        return {"error": str(exc)}
+        return _exception_result(exc)
 
 
 def kernel_memory_recall(
@@ -513,12 +577,13 @@ def kernel_memory_recall(
     )
 
     return {
-        "schema_version": "4.0.0-memory",
+        "schema_version": "4.1.0-memory",
         "mode": "memory_recall",
         "query": query,
         "memory_type": memory_type,
         "results": results,
         "count": len(results),
+        "memory_scope": memory_runtime_provenance() if MEMORY_RUNTIME_AVAILABLE else {},
     }
 
 
@@ -552,21 +617,45 @@ def kernel_memory_analyze(
     )
     pressure = weighted_sum / max(1, total_memories)
     health_score = round(1.0 / (1.0 + pressure), 3)
+    betti_breakdown = analyzer_output.get("results", {}).get(
+        "mem.betti_breakdown", {}
+    )
+    circular_summary = analyzer_output.get("results", {}).get(
+        "mem.circular", {}
+    ).get("summary", {})
+    cycle_semantics = {
+        "beta_1_is_not_directed_cycle_count": True,
+        "directed_reasoning_cycle_witness_count": (
+            betti_breakdown.get("summary", {}).get(
+                "directed_reasoning_cycle_witness_count", 0
+            )
+        ),
+        "directed_cycle_witness_semantics": circular_summary.get(
+            "directed_cycle_witness_semantics",
+            "deduplicated DFS back-edge witnesses; not all elementary cycles",
+        ),
+    }
 
     if output_mode == "summary":
         return {
-            "schema_version": "4.0.0-memory",
+            "schema_version": "4.1.0-memory",
             "mode": "memory_analyze",
+            "topological_model": memory_graph.get("model", {}),
+            "cycle_semantics": cycle_semantics,
             "memory_stats": memory_graph["summary"],
             "memory_health_score": health_score,
             "findings_by_severity": severity_counts,
             "total_findings": total_findings,
             "analyzers_run": analyzer_output["analyzers_run"],
+            "analyzers_failed": analyzer_output.get("analyzers_failed", 0),
+            "analyzer_errors": analyzer_output.get("errors", {}),
         }
 
     return {
-        "schema_version": "4.0.0-memory",
+        "schema_version": "4.1.0-memory",
         "mode": "memory_analyze",
+        "topological_model": memory_graph.get("model", {}),
+        "cycle_semantics": cycle_semantics,
         "memory_graph_summary": memory_graph["summary"],
         "analyzers": analyzer_output,
         "memory_health_score": health_score,
@@ -587,7 +676,7 @@ def kernel_memory_stats() -> Dict[str, Any]:
 
     stats = get_memory_stats()
     return {
-        "schema_version": "4.0.0-memory",
+        "schema_version": "4.1.0-memory",
         "mode": "memory_stats",
         **stats,
     }
@@ -611,13 +700,13 @@ def kernel_memory_associate(
             strength=strength,
         )
         return {
-            "schema_version": "4.0.0-memory",
+            "schema_version": "4.1.0-memory",
             "mode": "memory_associate",
             "status": "associated",
             "association": assoc,
         }
     except Exception as exc:
-        return {"error": str(exc)}
+        return _exception_result(exc)
 
 
 def kernel_memory_consolidate(
@@ -640,13 +729,13 @@ def kernel_memory_consolidate(
             importance=importance,
         )
         return {
-            "schema_version": "4.0.0-memory",
+            "schema_version": "4.1.0-memory",
             "mode": "memory_consolidate",
             "status": "consolidated",
             **result,
         }
     except Exception as exc:
-        return {"error": str(exc)}
+        return _exception_result(exc)
 
 
 def kernel_memory_steer(output_mode: str = "full") -> Dict[str, Any]:
@@ -690,14 +779,25 @@ def kernel_memory_steer(output_mode: str = "full") -> Dict[str, Any]:
     drift = detect_memory_drift(fingerprint, baseline)
 
     # Generate steering signals
-    signals = generate_memory_steering_signals(fingerprint, drift, health_score)
+    directed_reasoning_count = (
+        analyzer_output.get("results", {})
+        .get("mem.betti_breakdown", {})
+        .get("summary", {})
+        .get("directed_reasoning_cycle_witness_count", 0)
+    )
+    signals = generate_memory_steering_signals(
+        fingerprint,
+        drift,
+        health_score,
+        directed_reasoning_cycle_witness_count=directed_reasoning_count,
+    )
 
     # Assemble prompt block
     prompt_block = assemble_memory_prompt_block(fingerprint, drift, signals, health_score)
 
     if output_mode == "summary":
         return {
-            "schema_version": "4.0.0-memory",
+            "schema_version": "4.1.0-memory",
             "mode": "memory_steer",
             "summary": {
                 "has_baseline": drift.get("has_baseline", False),
@@ -711,7 +811,7 @@ def kernel_memory_steer(output_mode: str = "full") -> Dict[str, Any]:
         }
 
     return {
-        "schema_version": "4.0.0-memory",
+        "schema_version": "4.1.0-memory",
         "mode": "memory_steer",
         "fingerprint": fingerprint,
         "health_score": health_score,
@@ -757,7 +857,7 @@ def kernel_memory_establish() -> Dict[str, Any]:
     result = establish_memory_baseline(fingerprint, health_score)
 
     return {
-        "schema_version": "4.0.0-memory",
+        "schema_version": "4.1.0-memory",
         "mode": "memory_establish",
         **result,
     }
@@ -781,7 +881,7 @@ def kernel_memory_drift() -> Dict[str, Any]:
     drift = detect_memory_drift(fingerprint, baseline)
 
     return {
-        "schema_version": "4.0.0-memory",
+        "schema_version": "4.1.0-memory",
         "mode": "memory_drift",
         "fingerprint": fingerprint,
         "drift_analysis": drift,
@@ -800,12 +900,12 @@ def kernel_memory_consolidate_by_tag(
         from memory.store import consolidate_by_tag
         result = consolidate_by_tag(tag=tag, content=content, importance=importance)
         return {
-            "schema_version": "4.0.0-memory",
+            "schema_version": "4.1.0-memory",
             "mode": "memory_consolidate_by_tag",
             **result,
         }
     except Exception as exc:
-        return {"error": str(exc)}
+        return _exception_result(exc)
 
 
 def kernel_memory_consolidate_auto(
@@ -822,12 +922,12 @@ def kernel_memory_consolidate_auto(
             importance=importance,
         )
         return {
-            "schema_version": "4.0.0-memory",
+            "schema_version": "4.1.0-memory",
             "mode": "memory_consolidate_auto",
             **result,
         }
     except Exception as exc:
-        return {"error": str(exc)}
+        return _exception_result(exc)
 
 
 def kernel_memory_unconsolidated_tags() -> Dict[str, Any]:
@@ -838,12 +938,12 @@ def kernel_memory_unconsolidated_tags() -> Dict[str, Any]:
         from memory.store import get_unconsolidated_by_tag
         result = get_unconsolidated_by_tag()
         return {
-            "schema_version": "4.0.0-memory",
+            "schema_version": "4.1.0-memory",
             "mode": "memory_unconsolidated_tags",
             **result,
         }
     except Exception as exc:
-        return {"error": str(exc)}
+        return _exception_result(exc)
 
 
 def kernel_memory_betti_breakdown() -> Dict[str, Any]:
@@ -856,12 +956,12 @@ def kernel_memory_betti_breakdown() -> Dict[str, Any]:
         memory_graph = build_memory_graph()
         result = analyze_betti_breakdown(memory_graph)
         return {
-            "schema_version": "4.0.0-memory",
+            "schema_version": "4.1.0-memory",
             "mode": "memory_betti_breakdown",
             **result,
         }
     except Exception as exc:
-        return {"error": str(exc)}
+        return _exception_result(exc)
 
 
 def kernel_memory_compact(
@@ -898,7 +998,7 @@ def kernel_memory_compact(
         full_manifold = analyze_manifold(full_graph)
 
         return {
-            "schema_version": "4.0.0-memory",
+            "schema_version": "4.1.0-memory",
             "mode": "memory_compact_stats",
             "archive_stats": archive_stats,
             "active_graph_betti": active_manifold["manifold"]["betti_numbers"],
@@ -909,7 +1009,7 @@ def kernel_memory_compact(
     if restore_all:
         result = restore_all_archived()
         return {
-            "schema_version": "4.0.0-memory",
+            "schema_version": "4.1.0-memory",
             "mode": "memory_compact_restore",
             **result,
         }
@@ -919,7 +1019,7 @@ def kernel_memory_compact(
         if result is None:
             return {"error": f"Memory not found: {restore_id}"}
         return {
-            "schema_version": "4.0.0-memory",
+            "schema_version": "4.1.0-memory",
             "mode": "memory_compact_restore",
             "restored": result,
         }
@@ -939,7 +1039,7 @@ def kernel_memory_compact(
 
     if dry_run:
         return {
-            "schema_version": "4.0.0-memory",
+            "schema_version": "4.1.0-memory",
             "mode": "memory_compact",
             **compact_result,
             "betti_before": betti_before,
@@ -961,7 +1061,7 @@ def kernel_memory_compact(
     }
 
     return {
-        "schema_version": "4.0.0-memory",
+        "schema_version": "4.1.0-memory",
         "mode": "memory_compact",
         **compact_result,
         "betti_before": betti_before,
@@ -990,12 +1090,12 @@ def kernel_memory_bridge(
             safe_mode=safe_mode,
         )
         return {
-            "schema_version": "4.0.0-memory",
+            "schema_version": "4.1.0-memory",
             "mode": "memory_bridge",
             **result,
         }
     except Exception as exc:
-        return {"error": str(exc)}
+        return _exception_result(exc)
 
 
 def kernel_memory_bridge_auto(
@@ -1016,12 +1116,12 @@ def kernel_memory_bridge_auto(
             dry_run=dry_run,
         )
         return {
-            "schema_version": "4.0.0-memory",
+            "schema_version": "4.1.0-memory",
             "mode": "memory_bridge_auto",
             **result,
         }
     except Exception as exc:
-        return {"error": str(exc)}
+        return _exception_result(exc)
 
 
 def kernel_memory_bridge_candidates(
@@ -1034,12 +1134,12 @@ def kernel_memory_bridge_candidates(
         from memory.store import get_bridge_candidates
         result = get_bridge_candidates(min_shared_tags=min_shared_tags)
         return {
-            "schema_version": "4.0.0-memory",
+            "schema_version": "4.1.0-memory",
             "mode": "memory_bridge_candidates",
             **result,
         }
     except Exception as exc:
-        return {"error": str(exc)}
+        return _exception_result(exc)
 
 
 def kernel_memory_kan(
@@ -1054,12 +1154,12 @@ def kernel_memory_kan(
     try:
         result = kan_retrieve(query, mode=mode, max_depth=max_depth)
         return {
-            "schema_version": "4.0.0-memory",
+            "schema_version": "4.1.0-memory",
             "mode": "memory_kan",
             **result,
         }
     except Exception as exc:
-        return {"error": str(exc)}
+        return _exception_result(exc)
 
 
 def kernel_xanalyze(
@@ -1073,6 +1173,8 @@ def kernel_xanalyze(
     """
     if not SHARED_GRAPH_AVAILABLE or not REGISTRY_AVAILABLE:
         return {"error": "required modules not available"}
+
+    _bind_memory_scope_to_scan(scan_root)
 
     # Step 1: Build graph + run analyzers
     graph = _build_kernel_graph(scan_root)
@@ -1105,7 +1207,11 @@ def kernel_xanalyze(
     if auto_store and CROSS_DOMAIN_AVAILABLE:
         storeable = filter_findings_for_memory(analyzer_results, correlations)
         if storeable:
-            store_result = auto_store_findings(storeable, scan_root)
+            store_result = auto_store_findings(
+                storeable,
+                scan_root,
+                evidence_signature=fingerprint.get("signature_hash"),
+            )
         else:
             store_result = {"stored_count": 0, "reason": "no storeable findings"}
 
@@ -1127,7 +1233,7 @@ def kernel_xanalyze(
 
     if output_mode == "summary":
         return {
-            "schema_version": "4.0.0-memory",
+            "schema_version": "4.1.0-memory",
             "mode": "xanalyze",
             "scan_root": scan_root,
             "graph_cache": graph.get("cache", {}),
@@ -1147,7 +1253,7 @@ def kernel_xanalyze(
         }
 
     return {
-        "schema_version": "4.0.0-memory",
+        "schema_version": "4.1.0-memory",
         "mode": "xanalyze",
         "scan_root": scan_root,
         "graph_cache": graph.get("cache", {}),
@@ -1168,6 +1274,8 @@ def kernel_xsteer(scan_root: str = ".", output_mode: str = "full") -> Dict[str, 
     if not CROSS_DOMAIN_AVAILABLE:
         return {"error": "cross_domain_bridge not available"}
 
+    _bind_memory_scope_to_scan(scan_root)
+
     root_error = _validate_scan_root(scan_root)
     if root_error:
         return root_error
@@ -1181,12 +1289,13 @@ def kernel_xsteer(scan_root: str = ".", output_mode: str = "full") -> Dict[str, 
 
     if output_mode == "summary":
         return {
-            "schema_version": "4.0.0-memory",
+            "schema_version": "4.1.0-memory",
             "mode": "xsteer",
             "graph_cache": graph.get("cache", {}),
             "analyzer_cache": analyzer_output.get("cache", {}),
             "codebase": result.get("codebase_steering", {}),
             "memory": result.get("memory_steering", {}),
+            "memory_scope": result.get("memory_scope", {}),
             "consolidation_candidate": result.get("consolidation_signal", {}).get("consolidation_candidate", False),
         }
 
@@ -1209,7 +1318,7 @@ def kernel_fiber(subcommand: str, args: List[str]) -> Dict[str, Any]:
     if subcommand == "init":
         task = args[0] if len(args) > 0 else "general"
         focus = args[1] if len(args) > 1 else "general"
-        return {"schema_version": "4.0.0-memory", "mode": "fiber_init", **init_fiber(task, focus)}
+        return {"schema_version": "4.1.0-memory", "mode": "fiber_init", **init_fiber(task, focus)}
 
     elif subcommand == "lift":
         query = None
@@ -1233,7 +1342,7 @@ def kernel_fiber(subcommand: str, args: List[str]) -> Dict[str, Any]:
             else:
                 i += 1
         result = lift_to_fiber(query=query, memory_type=mem_type, tags=tags, max_lift=max_lift)
-        return {"schema_version": "4.0.0-memory", "mode": "fiber_lift", **result}
+        return {"schema_version": "4.1.0-memory", "mode": "fiber_lift", **result}
 
     elif subcommand == "descend":
         memory_id = args[0] if args and not args[0].startswith("--") else None
@@ -1243,31 +1352,31 @@ def kernel_fiber(subcommand: str, args: List[str]) -> Dict[str, Any]:
             if arg == "--reason" and i + 1 < len(args):
                 reason = args[i + 1]
         result = descend_from_fiber(memory_id=memory_id, descend_all=descend_all, reason=reason)
-        return {"schema_version": "4.0.0-memory", "mode": "fiber_descend", **result}
+        return {"schema_version": "4.1.0-memory", "mode": "fiber_descend", **result}
 
     elif subcommand == "status":
-        return {"schema_version": "4.0.0-memory", "mode": "fiber_status", **fiber_status()}
+        return {"schema_version": "4.1.0-memory", "mode": "fiber_status", **fiber_status()}
 
     elif subcommand == "section_start":
         name = args[0] if len(args) > 0 else "unnamed"
         narrative = args[1] if len(args) > 1 else ""
         result = start_section(name, narrative)
-        return {"schema_version": "4.0.0-memory", "mode": "fiber_section_start", **result}
+        return {"schema_version": "4.1.0-memory", "mode": "fiber_section_start", **result}
 
     elif subcommand == "section_add":
         if not args:
             return {"error": "Usage: fiber section_add <memory_id>"}
         result = add_to_section(args[0])
-        return {"schema_version": "4.0.0-memory", "mode": "fiber_section_add", **result}
+        return {"schema_version": "4.1.0-memory", "mode": "fiber_section_add", **result}
 
     elif subcommand == "section_status":
-        return {"schema_version": "4.0.0-memory", "mode": "fiber_section_status", **get_section_status()}
+        return {"schema_version": "4.1.0-memory", "mode": "fiber_section_status", **get_section_status()}
 
     elif subcommand == "switch":
         task = args[0] if len(args) > 0 else "new_task"
         focus = args[1] if len(args) > 1 else "new_focus"
         result = switch_base(task, focus)
-        return {"schema_version": "4.0.0-memory", "mode": "fiber_switch", **result}
+        return {"schema_version": "4.1.0-memory", "mode": "fiber_switch", **result}
 
     elif subcommand == "list_archives":
         return kernel_fiber_list_archives()
@@ -1327,9 +1436,9 @@ def kernel_fiber_transport(
             max_transport=max_transport,
             dry_run=dry_run,
         )
-        return {"schema_version": "4.0.0-memory", "mode": "fiber_transport", **result}
+        return {"schema_version": "4.1.0-memory", "mode": "fiber_transport", **result}
     except Exception as exc:
-        return {"error": str(exc)}
+        return _exception_result(exc)
 
 
 def kernel_fiber_list_archives() -> Dict[str, Any]:
@@ -1339,9 +1448,9 @@ def kernel_fiber_list_archives() -> Dict[str, Any]:
     
     try:
         result = list_archived_fibers()
-        return {"schema_version": "4.0.0-memory", "mode": "fiber_list_archives", **result}
+        return {"schema_version": "4.1.0-memory", "mode": "fiber_list_archives", **result}
     except Exception as exc:
-        return {"error": str(exc)}
+        return _exception_result(exc)
 
 
 
@@ -1561,6 +1670,26 @@ def kernel_brief(
     }
 
 
+def _memory_context_metadata(memory_context: Dict[str, Any]) -> Dict[str, Any]:
+    """Expose memory provenance without duplicating prompt content outside its budget."""
+    return {
+        "selected_count": memory_context.get("selected_count", 0),
+        "retrieved_count": memory_context.get("retrieved_count", 0),
+        "selected": [
+            {
+                "id": item.get("id"),
+                "type": item.get("type"),
+                "content_sha256": item.get("content_sha256"),
+                "content_truncated": item.get("content_truncated", False),
+                "retrieval_match": item.get("retrieval_match", {}),
+            }
+            for item in memory_context.get("memories", [])
+        ],
+        "memory_scope": memory_context.get("memory_scope", {}),
+        "retrieval": memory_context.get("retrieval", {}),
+    }
+
+
 def kernel_context(
     scan_root: str,
     query: str,
@@ -1615,9 +1744,18 @@ def kernel_context(
             maximum=MAX_HOPS,
         )
 
+    _bind_memory_scope_to_scan(scan_root)
+
     # One canonical scan; all analyzers and the optimizer reuse this snapshot.
     graph = _build_kernel_graph(scan_root)
     analyzer_output = _run_kernel_analyzers(graph)
+    memory_context: Dict[str, Any] = {}
+    if CROSS_DOMAIN_AVAILABLE:
+        memory_context = get_memory_evidence(
+            query=query,
+            target_files=target_files,
+            max_memories=5,
+        )
     pack = build_context_pack(
         graph,
         query,
@@ -1626,6 +1764,7 @@ def kernel_context(
         max_hops=max_hops,
         detail=detail,
         analyzer_output=analyzer_output,
+        memory_context=memory_context,
     )
     unresolved_targets = pack.get("selection", {}).get("unresolved_targets", [])
     if unresolved_targets:
@@ -1647,6 +1786,7 @@ def kernel_context(
     }
     if output_mode == "prompt":
         selection = pack.get("selection", {})
+        memory_metadata = _memory_context_metadata(pack.get("memory_context", {}))
         return {
             **base,
             "model": pack.get("model", {}),
@@ -1659,15 +1799,18 @@ def kernel_context(
             },
             "budget": pack.get("budget", {}),
             "provenance": pack.get("provenance", {}),
+            "memory_context": memory_metadata,
             "context_block": pack.get("context_block", ""),
         }
     if output_mode == "summary":
+        memory_metadata = _memory_context_metadata(pack.get("memory_context", {}))
         return {
             **base,
             "model": pack.get("model", {}),
             "selection": pack.get("selection", {}),
             "budget": pack.get("budget", {}),
             "provenance": pack.get("provenance", {}),
+            "memory_context": memory_metadata,
             "quotient_summary": pack.get("quotient_graph", {}).get("summary", {}),
             "selected_files": [
                 {
@@ -1984,12 +2127,17 @@ def kernel_steer(
 
 
 def main():
+    global _MEMORY_SCOPE_EXPLICIT
+
     if len(sys.argv) < 2 or sys.argv[1] in ("--help", "-h", "help"):
         print(json.dumps({
             "tool": "hott_kernel",
             "schema_version": "4.0.0-kernel",
             "global_options": {
                 "cache_mode": "--cache-mode auto|refresh|off (or AI_STUDIO_GRAPH_CACHE)",
+                "memory_project_root": "--memory-project-root PATH (or AI_STUDIO_PROJECT_ROOT)",
+                "memory_scope": "--memory-scope NAME (or AI_STUDIO_MEMORY_SCOPE)",
+                "memory_state_dir": "--memory-state-dir PATH (or AI_STUDIO_STATE_DIR)",
             },
             "usage": {
                 "analyze": "python3 hott_kernel.py analyze [root] [--analyzers a,b] [--output full|summary|findings|graph]",
@@ -2032,6 +2180,37 @@ def main():
             },
         }, indent=2))
         return
+
+    runtime_options = {
+        "project_root": None,
+        "scope": None,
+        "state_dir": None,
+    }
+    runtime_flags = {
+        "--memory-project-root": "project_root",
+        "--memory-scope": "scope",
+        "--memory-state-dir": "state_dir",
+    }
+    for index, argument in enumerate(sys.argv):
+        option_name = runtime_flags.get(argument)
+        if option_name is None:
+            continue
+        if index + 1 >= len(sys.argv) or sys.argv[index + 1].startswith("--"):
+            _emit_cli_result(_kernel_error(
+                "missing_memory_runtime_option",
+                f"{argument} requires a non-empty value.",
+                option=argument,
+            ))
+        runtime_options[option_name] = sys.argv[index + 1]
+    if any(value is not None for value in runtime_options.values()):
+        if not MEMORY_RUNTIME_AVAILABLE:
+            _emit_cli_result(_kernel_error(
+                "memory_runtime_unavailable",
+                "Memory runtime configuration is not available.",
+            ))
+        configure_memory_runtime(**runtime_options)
+        if runtime_options["project_root"] is not None or runtime_options["scope"] is not None:
+            _MEMORY_SCOPE_EXPLICIT = True
 
     requested_cache_mode = _ACTIVE_GRAPH_CACHE_MODE
     for index, argument in enumerate(sys.argv):
@@ -2228,7 +2407,7 @@ def main():
 
     elif mode == "memory_store":
         if len(sys.argv) < 4:
-            print(json.dumps({"error": "Usage: hott_kernel.py memory_store <type> <content> [--source src] [--importance 0.5] [--tags t1,t2]"}))
+            _emit_cli_result({"error": "Usage: hott_kernel.py memory_store <type> <content> [--source src] [--importance 0.5] [--tags t1,t2]"})
             return
         m_type = sys.argv[2]
         m_content = sys.argv[3]
@@ -2246,7 +2425,7 @@ def main():
             elif arg == "--tags" and i + 1 < len(sys.argv):
                 m_tags = sys.argv[i + 1]
         result = kernel_memory_store(m_type, m_content, m_source, m_importance, m_tags)
-        print(json.dumps(result, indent=2))
+        _emit_cli_result(result)
 
     elif mode == "memory_recall":
         m_query = sys.argv[2] if len(sys.argv) > 2 and not sys.argv[2].startswith("--") else None
@@ -2264,7 +2443,7 @@ def main():
                 except ValueError:
                     pass
         result = kernel_memory_recall(m_query, m_type, m_tags, m_limit)
-        print(json.dumps(result, indent=2))
+        _emit_cli_result(result)
 
     elif mode == "memory_analyze":
         m_analyzers = None
@@ -2275,15 +2454,15 @@ def main():
             elif arg == "--output" and i + 1 < len(sys.argv):
                 m_output = sys.argv[i + 1]
         result = kernel_memory_analyze(m_analyzers, m_output)
-        print(json.dumps(result, indent=2))
+        _emit_cli_result(result)
 
     elif mode == "memory_stats":
         result = kernel_memory_stats()
-        print(json.dumps(result, indent=2))
+        _emit_cli_result(result)
 
     elif mode in ("memory_associate", "associate"):
         if len(sys.argv) < 5:
-            print(json.dumps({"error": "Usage: hott_kernel.py memory_associate <from_id> <to_id> <type> [--strength 0.7]"}))
+            _emit_cli_result({"error": "Usage: hott_kernel.py memory_associate <from_id> <to_id> <type> [--strength 0.7]"})
             return
         from_id = sys.argv[2]
         to_id = sys.argv[3]
@@ -2296,11 +2475,11 @@ def main():
                 except ValueError:
                     pass
         result = kernel_memory_associate(from_id, to_id, assoc_type, strength)
-        print(json.dumps(result, indent=2))
+        _emit_cli_result(result)
 
     elif mode in ("memory_consolidate", "consolidate"):
         if len(sys.argv) < 3:
-            print(json.dumps({"error": "Usage: hott_kernel.py memory_consolidate <id1,id2,...> --content '...'"}))
+            _emit_cli_result({"error": "Usage: hott_kernel.py memory_consolidate <id1,id2,...> --content '...'"})
             return
         source_ids = sys.argv[2].split(",")
         content = ""
@@ -2317,10 +2496,10 @@ def main():
                 except ValueError:
                     pass
         if not content:
-            print(json.dumps({"error": "--content is required"}))
+            _emit_cli_result({"error": "--content is required"})
             return
         result = kernel_memory_consolidate(source_ids, content, tags, importance)
-        print(json.dumps(result, indent=2))
+        _emit_cli_result(result)
 
     elif mode in ("memory_steer",):
         output_mode = "full"
@@ -2328,24 +2507,24 @@ def main():
             if arg == "--output" and i + 1 < len(sys.argv):
                 output_mode = sys.argv[i + 1]
         result = kernel_memory_steer(output_mode)
-        print(json.dumps(result, indent=2))
+        _emit_cli_result(result)
 
     elif mode in ("memory_establish",):
         result = kernel_memory_establish()
-        print(json.dumps(result, indent=2))
+        _emit_cli_result(result)
 
     elif mode in ("memory_drift",):
         result = kernel_memory_drift()
-        print(json.dumps(result, indent=2))
+        _emit_cli_result(result)
 
     elif mode == "memory":
         if len(sys.argv) < 3:
-            print(json.dumps({"error": "Usage: hott_kernel.py memory <submode> ..."}))
+            _emit_cli_result({"error": "Usage: hott_kernel.py memory <submode> ..."})
             return
         submode = sys.argv[2]
         if submode == "store":
             if len(sys.argv) < 5:
-                print(json.dumps({"error": "Usage: memory store <type> <content> [--source src] [--importance 0.5] [--tags t1,t2]"}))
+                _emit_cli_result({"error": "Usage: memory store <type> <content> [--source src] [--importance 0.5] [--tags t1,t2]"})
                 return
             m_type = sys.argv[3]
             m_content = sys.argv[4]
@@ -2363,7 +2542,7 @@ def main():
                 elif arg == "--tags" and i + 1 < len(sys.argv):
                     m_tags = sys.argv[i + 1]
             result = kernel_memory_store(m_type, m_content, m_source, m_importance, m_tags)
-            print(json.dumps(result, indent=2))
+            _emit_cli_result(result)
         elif submode == "recall":
             m_query = sys.argv[3] if len(sys.argv) > 3 and not sys.argv[3].startswith("--") else None
             m_type = None
@@ -2380,7 +2559,7 @@ def main():
                     except ValueError:
                         pass
             result = kernel_memory_recall(m_query, m_type, m_tags, m_limit)
-            print(json.dumps(result, indent=2))
+            _emit_cli_result(result)
         elif submode == "analyze":
             m_analyzers = None
             m_output = "full"
@@ -2390,13 +2569,13 @@ def main():
                 elif arg == "--output" and i + 1 < len(sys.argv):
                     m_output = sys.argv[i + 1]
             result = kernel_memory_analyze(m_analyzers, m_output)
-            print(json.dumps(result, indent=2))
+            _emit_cli_result(result)
         elif submode == "stats":
             result = kernel_memory_stats()
-            print(json.dumps(result, indent=2))
+            _emit_cli_result(result)
         elif submode == "associate":
             if len(sys.argv) < 6:
-                print(json.dumps({"error": "Usage: memory associate <from_id> <to_id> <type> [--strength 0.7]"}))
+                _emit_cli_result({"error": "Usage: memory associate <from_id> <to_id> <type> [--strength 0.7]"})
                 return
             from_id = sys.argv[3]
             to_id = sys.argv[4]
@@ -2409,10 +2588,10 @@ def main():
                     except ValueError:
                         pass
             result = kernel_memory_associate(from_id, to_id, assoc_type, strength)
-            print(json.dumps(result, indent=2))
+            _emit_cli_result(result)
         elif submode == "consolidate":
             if len(sys.argv) < 5:
-                print(json.dumps({"error": "Usage: memory consolidate <id1,id2,...> --content '...'"}))
+                _emit_cli_result({"error": "Usage: memory consolidate <id1,id2,...> --content '...'"})
                 return
             source_ids = sys.argv[3].split(",")
             content = ""
@@ -2429,29 +2608,29 @@ def main():
                     except ValueError:
                         pass
             if not content:
-                print(json.dumps({"error": "--content is required"}))
+                _emit_cli_result({"error": "--content is required"})
                 return
             result = kernel_memory_consolidate(source_ids, content, tags, importance)
-            print(json.dumps(result, indent=2))
+            _emit_cli_result(result)
         elif submode == "steer":
             output_mode = "full"
             for i, arg in enumerate(sys.argv):
                 if arg == "--output" and i + 1 < len(sys.argv):
                     output_mode = sys.argv[i + 1]
             result = kernel_memory_steer(output_mode)
-            print(json.dumps(result, indent=2))
+            _emit_cli_result(result)
         elif submode == "establish":
             result = kernel_memory_establish()
-            print(json.dumps(result, indent=2))
+            _emit_cli_result(result)
         elif submode == "drift":
             result = kernel_memory_drift()
-            print(json.dumps(result, indent=2))
+            _emit_cli_result(result)
         elif submode == "betti_breakdown":
             result = kernel_memory_betti_breakdown()
-            print(json.dumps(result, indent=2))
+            _emit_cli_result(result)
         elif submode == "consolidate_by_tag":
             if len(sys.argv) < 4:
-                print(json.dumps({"error": "Usage: memory consolidate_by_tag <tag> [--content '...'] [--importance 0.9]"}))
+                _emit_cli_result({"error": "Usage: memory consolidate_by_tag <tag> [--content '...'] [--importance 0.9]"})
                 return
             m_tag = sys.argv[3]
             m_content = None
@@ -2465,7 +2644,7 @@ def main():
                     except ValueError:
                         pass
             result = kernel_memory_consolidate_by_tag(m_tag, m_content, m_importance)
-            print(json.dumps(result, indent=2))
+            _emit_cli_result(result)
         elif submode == "consolidate_auto":
             min_size = 3
             m_importance = 0.9
@@ -2481,10 +2660,10 @@ def main():
                     except ValueError:
                         pass
             result = kernel_memory_consolidate_auto(min_size, m_importance)
-            print(json.dumps(result, indent=2))
+            _emit_cli_result(result)
         elif submode == "unconsolidated_tags":
             result = kernel_memory_unconsolidated_tags()
-            print(json.dumps(result, indent=2))
+            _emit_cli_result(result)
         elif submode == "compact":
             # Parse flags
             only_consolidated = True
@@ -2524,11 +2703,11 @@ def main():
                 restore_all=restore_all,
                 stats=stats,
             )
-            print(json.dumps(result, indent=2))
+            _emit_cli_result(result)
         elif submode == "bridge":
             # memory bridge <from_id> <to_id> [type] [--strength 0.7] [--unsafe]
             if len(sys.argv) < 5:
-                print(json.dumps({"error": "Usage: memory bridge <from_id> <to_id> [type] [--strength 0.7]"}))
+                _emit_cli_result({"error": "Usage: memory bridge <from_id> <to_id> [type] [--strength 0.7]"})
                 return
             from_id = sys.argv[3]
             to_id = sys.argv[4]
@@ -2544,7 +2723,7 @@ def main():
                 elif arg == "--unsafe":
                     safe_mode = False
             result = kernel_memory_bridge(from_id, to_id, assoc_type, strength, safe_mode)
-            print(json.dumps(result, indent=2))
+            _emit_cli_result(result)
 
         elif submode == "bridge_auto":
             # memory bridge_auto [--min-shared-tags 1] [--type semantic] [--dry-run] [--unsafe]
@@ -2565,7 +2744,7 @@ def main():
                 elif arg == "--unsafe":
                     safe_mode = False
             result = kernel_memory_bridge_auto(min_shared_tags, assoc_type, safe_mode, dry_run)
-            print(json.dumps(result, indent=2))
+            _emit_cli_result(result)
 
         elif submode == "bridge_candidates":
             # memory bridge_candidates [--min-shared-tags 1]
@@ -2577,11 +2756,11 @@ def main():
                     except ValueError:
                         pass
             result = kernel_memory_bridge_candidates(min_shared_tags)
-            print(json.dumps(result, indent=2))
+            _emit_cli_result(result)
         elif submode == "kan":
             # memory kan <query> [--mode lan|ran|both] [--max-depth 2]
             if len(sys.argv) < 4:
-                print(json.dumps({"error": "Usage: memory kan <query> [--mode lan|ran|both] [--max-depth 2]"}))
+                _emit_cli_result({"error": "Usage: memory kan <query> [--mode lan|ran|both] [--max-depth 2]"})
                 return
             query = sys.argv[3]
             kan_mode = "both"
@@ -2595,12 +2774,12 @@ def main():
                     except ValueError:
                         pass
             if kan_mode not in ("lan", "ran", "both"):
-                print(json.dumps({"error": f"Invalid mode: {kan_mode}. Use lan, ran, or both."}))
+                _emit_cli_result({"error": f"Invalid mode: {kan_mode}. Use lan, ran, or both."})
                 return
             result = kernel_memory_kan(query, kan_mode, max_depth)
-            print(json.dumps(result, indent=2))
+            _emit_cli_result(result)
         else:
-            print(json.dumps({"error": f"Unknown memory submode: {submode}"}))
+            _emit_cli_result({"error": f"Unknown memory submode: {submode}"})
 
     elif mode == "xanalyze":
         root = sys.argv[2] if len(sys.argv) > 2 and not sys.argv[2].startswith("--") else "."
@@ -2615,7 +2794,7 @@ def main():
             elif arg == "--analyzers" and i + 1 < len(sys.argv):
                 analyzers = sys.argv[i + 1].split(",")
         result = kernel_xanalyze(root, analyzers, output_mode, auto_store)
-        print(json.dumps(result, indent=2))
+        _emit_cli_result(result)
 
     elif mode == "xsteer":
         root = sys.argv[2] if len(sys.argv) > 2 and not sys.argv[2].startswith("--") else "."
@@ -2624,30 +2803,30 @@ def main():
             if arg == "--output" and i + 1 < len(sys.argv):
                 output_mode = sys.argv[i + 1]
         result = kernel_xsteer(root, output_mode)
-        print(json.dumps(result, indent=2))
+        _emit_cli_result(result)
 
     elif mode == "xcontext":
         if len(sys.argv) < 3:
-            print(json.dumps({"error": "Usage: hott_kernel.py xcontext <file_path>"}))
+            _emit_cli_result({"error": "Usage: hott_kernel.py xcontext <file_path>"})
             return
         file_path = sys.argv[2]
         result = kernel_xcontext(file_path)
-        print(json.dumps(result, indent=2))
+        _emit_cli_result(result)
 
     elif mode == "fiber":
         if len(sys.argv) < 3:
-            print(json.dumps({
+            _emit_cli_result({
                 "error": "Usage: hott_kernel.py fiber <init|lift|descend|status|section_start|section_add|section_status|switch|transport|list_archives> [args]"
-            }))
+            })
             return
         subcommand = sys.argv[2]
         
         if subcommand == "transport":
             # fiber transport <source_fiber_id> <new_task> <new_focus> [--threshold 0.6] [--max 10] [--dry-run]
             if len(sys.argv) < 6:
-                print(json.dumps({
+                _emit_cli_result({
                     "error": "Usage: fiber transport <source_fiber_id> <new_task> <new_focus> [--threshold 0.6] [--max 10] [--dry-run]"
-                }))
+                })
                 return
             source_id = sys.argv[3]
             new_task = sys.argv[4]
@@ -2675,16 +2854,16 @@ def main():
                 else:
                     i += 1
             result = kernel_fiber_transport(source_id, new_task, new_focus, threshold, max_transport, dry_run)
-            print(json.dumps(result, indent=2))
+            _emit_cli_result(result)
         
         elif subcommand == "list_archives":
             result = kernel_fiber_list_archives()
-            print(json.dumps(result, indent=2))
+            _emit_cli_result(result)
         
         else:
             args = sys.argv[3:]
             result = kernel_fiber(subcommand, args)
-            print(json.dumps(result, indent=2))
+            _emit_cli_result(result)
 
     else:
         _emit_cli_result(_kernel_error(
@@ -2696,4 +2875,11 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except MemoryStateError as exc:
+        _emit_cli_result(_kernel_error(
+            getattr(exc, "error_code", "memory_state_error"),
+            str(exc),
+            **getattr(exc, "details", {}),
+        ))

@@ -1,6 +1,6 @@
 """
 Memory Kan Extension — HoTT Kernel
-Schema Version: 4.0.0-memory
+Schema Version: 4.1.0-memory
 
 Implementasi Kan Extension dari hott2.txt:
 - Left Kan Extension (Lan): Bottom-up completion
