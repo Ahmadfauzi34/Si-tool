@@ -1,6 +1,6 @@
 """
 Context Section Management — Narrative Continuity
-Schema Version: 4.0.0-memory
+Schema Version: 4.1.0-memory
 """
 
 from context.fibration import (

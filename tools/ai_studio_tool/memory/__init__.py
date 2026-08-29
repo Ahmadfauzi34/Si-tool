@@ -4,6 +4,7 @@ Memory Domain — Topological Memory Management (Layer 2)
 
 from memory.store import (
     store_memory,
+    upsert_memory_observations,
     recall_memories,
     load_store,
     save_store,
@@ -28,6 +29,13 @@ from memory.store import (
     ASSOCIATION_TYPES,
     MEMORY_STATUS_ACTIVE,
     MEMORY_STATUS_ARCHIVED,
+)
+from memory.runtime import (
+    MemoryStateError,
+    MemoryStateCorruptionError,
+    configure_memory_runtime,
+    get_memory_runtime_paths,
+    memory_runtime_provenance,
 )
 from memory.graph import build_memory_graph
 from memory.analyzers import (
@@ -58,6 +66,7 @@ from memory.kan_extension import (
 
 __all__ = [
     "store_memory",
+    "upsert_memory_observations",
     "recall_memories",
     "load_store",
     "save_store",
@@ -82,6 +91,11 @@ __all__ = [
     "ASSOCIATION_TYPES",
     "MEMORY_STATUS_ACTIVE",
     "MEMORY_STATUS_ARCHIVED",
+    "MemoryStateError",
+    "MemoryStateCorruptionError",
+    "configure_memory_runtime",
+    "get_memory_runtime_paths",
+    "memory_runtime_provenance",
     "build_memory_graph",
     "analyze_fragmentation",
     "analyze_circular",

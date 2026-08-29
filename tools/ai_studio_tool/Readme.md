@@ -1,11 +1,11 @@
 
 
 ```markdown
-# HoTT Kernel 4.0 — Codebase Intelligence + Topological Memory Suite
+# HoTT Kernel 4.1 — Codebase Intelligence + Topological Memory Suite
 
-> **Schema Version:** 4.0.0-memory
+> **Schema Version:** 4.1.0-memory
 > **Entry Point:** `tools/ai_studio_tool/hott_kernel.py`
-> **Fixture Baseline:** 33 fixture minimal + 2 portable integration smoke PASS
+> **Fixture Baseline:** 35 fixture minimal + 2 portable integration smoke PASS
 
 ---
 
@@ -95,6 +95,18 @@ Karena orientasi import diabaikan saat menghitung Betti, β₁ tidak identik den
 jumlah circular import. `cycle_basis` menyediakan saksi path dan label
 `directed`/`mixed` agar LLM dapat membedakan keduanya.
 
+Domain Memory memakai model sejajar bernama
+`memory_association_multigraph_1_complex`:
+
+- vertex = satu memory record
+- 1-cell = satu association record; multiplicity association paralel dipertahankan
+- β₀/β₁ = invariant underlying undirected multigraph
+- directed circular reasoning = witness DFS terpisah, bukan nilai β₁
+
+Jumlah witness berarah bersifat deterministik untuk snapshot yang sama, tetapi
+bukan enumerasi seluruh elementary cycle. Setiap kesimpulan perlu memakai path
+witness dan tipe association yang dibawa output.
+
 Test topology memakai model terpisah bernama
 `static_test_import_reachability`. Model ini mengikuti relative import dari
 file `.spec/.test` menuju source dependency dan menghasilkan witness path.
@@ -124,6 +136,13 @@ antar-modul sebelum file witness dipilih. Skor ini deterministik untuk snapshot
 dan query yang sama, tetapi bukan bukti bahwa file yang diomit pasti tidak relevan.
 Budget token juga merupakan estimasi portabel `ceil(chars/4)`, bukan tokenizer
 khusus suatu model.
+
+Jika project scope memiliki memory yang cocok, command yang sama menambahkan
+blok `[PROJECT MEMORY EVIDENCE]` ke `context_block`. Memory dan source berbagi
+hard budget yang sama. Setiap memory membawa ID, source, content hash, jumlah
+observasi, scope, dan batas klaim retrieval. Memory diperlakukan sebagai
+observasi historis yang harus diverifikasi terhadap source saat ini, bukan
+sebagai instruksi atau source of truth.
 
 ### 2.2B Cache Persisten Dua Lapis
 
@@ -159,13 +178,35 @@ Field `graph_cache` membuat reuse dapat diaudit: `status`, `files_reused`,
 Field `analyzer_cache` melaporkan `status`, `analyzers_reused`,
 `analyzers_executed`, `reused_count`, `executed_count`, dan signature invalidasi.
 
+### 2.2C Runtime Memory yang Project-Scoped dan Durable
+
+Memory, baseline, fiber, archive, serta consolidation log disimpan di
+`data/runtime/scopes/<scope-id>/`, bukan di source tree memory dan bukan di
+repository state. Scope default berasal dari project root; untuk invocation
+dari lokasi lain gunakan `--memory-project-root`, atau beri identitas stabil
+dengan `--memory-scope`. Root state dapat dipindahkan melalui
+`--memory-state-dir`.
+
+Semua read-modify-write pada memory store diserialisasi dengan lock lintas-proses;
+setiap file runtime ditulis melalui atomic replace. File diberi mode `0600` dan
+direktori `0700` bila platform mendukungnya. Satu backup last-known-good
+dipertahankan. Primary rusak atau hilang dipulihkan hanya jika backup valid;
+jika tidak, read dan write diblok dengan `memory_store_corrupt` agar state tidak
+diam-diam menjadi store kosong. Operasi fiber multi-file tetap terdiri dari
+beberapa atomic file write, bukan transaksi database lintas-file.
+
+Evidence `xanalyze` memiliki deterministic dedup key. Analisis identik akan
+menambah `observation_count` pada node yang sama (`reused_count`), bukan
+menambahkan salinan memory. Ini adalah penyimpanan lokal milik tool, **bukan**
+memory internal atau training pada LLM.
+
 ### 2.3 Ide: Memori sebagai Ruang Topologis
 
 Memori agent tidak dimodelkan sebagai flat list atau vector embeddings, tapi sebagai **ruang topologis**:
 
 - **Memories** = points (titik dalam ruang)
 - **Associations** = paths (jalur antar titik)
-- **Circular reasoning** = loops (jalur yang kembali ke awal)
+- **Circular reasoning** = directed witness yang kembali ke awal; bukan β₁ saja
 - **Knowledge fragmentation** = disconnected components (β₀ > 1)
 - **Consolidation** = quotient (meleburkan yang setara)
 - **Forgetting** = descent (menurunkan, bukan menghapus)
@@ -239,7 +280,7 @@ Tool ini dibangun di atas 5 pilar teoretis dari Homotopy Type Theory (HoTT):
 - Safety checks (cycle prevention, fiber compatibility) = Batasan topologis
 - `xanalyze` auto-store = Episodic memory store
 - `consolidate_auto` = Consolidation engine
-- Betti-preservation = Jaminan keamanan bawaan
+- Directed-cycle prevention = Jaminan keamanan bawaan
 
 ### 3.5 HITs untuk Memory Consolidation (hott5)
 
@@ -250,7 +291,7 @@ Tool ini dibangun di atas 5 pilar teoretis dari Homotopy Type Theory (HoTT):
 **Implementasi**:
 - `memory betti_breakdown` = Meta-cognition (analisis bentuk memori)
 - `memory steer` = Steering berdasarkan topologi memori
-- Edge-Type-Aware Betti = Membedakan structural cycles vs reasoning cycles
+- Edge-Type-Aware Betti = Membedakan cycle rank per kategori association
 
 ---
 
@@ -296,6 +337,7 @@ Tool ini dibangun di atas 5 pilar teoretis dari Homotopy Type Theory (HoTT):
 | `context <query>` | Pilih subgraph sesuai pertanyaan | lexical overlap + shortest-path + centrality + findings |
 | `--target` | Tetapkan base projection eksplisit | target dan neighborhood hingga `--max-hops` |
 | `--budget-tokens` | Batasi ukuran `context_block` | hard character budget dengan estimasi token transparan |
+| project memory | Tambahkan observasi historis relevan | scope + lexical/path retrieval + content hash |
 | boundary quotient | Kompres graph file menjadi graph modul | cross-boundary edge + witness |
 | content signature | Identitas snapshot source+edge | deteksi context yang sudah stale |
 
@@ -334,15 +376,22 @@ Tool ini dibangun di atas 5 pilar teoretis dari Homotopy Type Theory (HoTT):
 
 ## 5. SAFETY CHECKS & INVARIANTS
 
-### 5.1 Betti-Preservation (MUTLAK)
+### 5.1 Directed Reasoning-Cycle Prevention (MUTLAK)
 
 ```
-β₁_reasoning HARUS SELALU = 0
+directed_reasoning_cycle_witness_count HARUS = 0 untuk safe bridge
 ```
+
+`β₁_reasoning` adalah cycle rank pada underlying undirected association
+multigraph. Nilai ini dapat naik karena diamond/reconvergence atau parallel
+1-cells tanpa circular reasoning berarah. Karena itu `β₁_reasoning > 0` adalah
+sinyal struktur untuk diperiksa, bukan bukti loop kognitif.
 
 Semua operasi yang berpotensi membuat reasoning cycle akan **ditolak secara deterministik**:
 - Bridge dengan `assoc_type="inferential"/"causal"` → DFS reachability check
-- Jika akan buat cycle → `{"status": "rejected", "reason": "would_create_reasoning_cycle"}`
+- `memory associate` dengan tipe reasoning memakai check yang sama di dalam transaksi
+- Safe bridge → `{"status": "rejected", "reason": "would_create_reasoning_cycle"}`
+- Direct associate → exit 2 dengan `error_code="would_create_reasoning_cycle"`
 
 ### 5.2 Fiber Compatibility
 
@@ -359,6 +408,13 @@ Hanya findings berikut yang disimpan ke memory:
 ### 5.4 Healthy Fragmentation
 
 Tidak semua komponen perlu dihubungkan. β₀ tinggi bisa valid jika memang domain berbeda. Bridge hanya jika ada shared context meaningful.
+
+### 5.5 Durable-State Boundary
+
+- Jangan commit `data/runtime/`; isinya dapat memuat source-derived evidence.
+- Jalankan dari project root atau tetapkan project scope secara eksplisit.
+- `recovered_from_backup` wajib terlihat pada provenance setelah recovery.
+- `memory_store_corrupt` adalah stop condition; perbaiki atau hapus state secara eksplisit.
 
 ---
 
@@ -408,6 +464,11 @@ hott_kernel.py cache status|refresh|clear src
 hott_kernel.py analyze src --output summary --cache-mode auto|refresh|off
 # Alternatif environment
 AI_STUDIO_GRAPH_CACHE=off hott_kernel.py analyze src --output summary
+
+# Scope runtime memory (flag dapat dipakai pada semua command)
+hott_kernel.py context "<query>" src --memory-project-root /path/to/project
+hott_kernel.py memory stats --memory-scope stable-project-name
+hott_kernel.py memory stats --memory-state-dir /private/local/state
 ```
 
 #### Memory Operations
@@ -549,9 +610,11 @@ Tool ini tidak membatasi apa yang bisa dilakukan agent. Tool ini menyediakan **r
 
 Semua output adalah **observasi**, bukan perintah. Tool tidak pernah mengatakan "jangan ubah file ini" atau "hapus file itu". Tool hanya melaporkan apa yang diamati, dan agent yang memutuskan.
 
-### 9.3 Prinsip "Betti-Preservation"
+### 9.3 Prinsip "Directed-Cycle Safety"
 
-Operasi pada memori harus menjaga β₁_reasoning = 0. Ini adalah jaminan bahwa tidak ada circular reasoning yang terbentuk. Jika operasi akan membuat cycle, sistem menolaknya secara deterministik.
+Safe bridge menjaga agar tidak ada path reasoning berarah yang kembali ke titik
+asal. DFS menolak edge yang menutup directed loop. Betti tetap dipakai sebagai
+invariant multigraph, tetapi tidak disamakan dengan jumlah directed cycle.
 
 ### 9.4 Prinsip "Structured Forgetting, Not Deletion"
 
@@ -568,14 +631,14 @@ Tidak semua hal perlu terhubung. β₀ tinggi bisa valid jika memang domain berb
 | Metrik | Nilai |
 |---|---|
 | Total CLI modes | 30+ |
-| Total analyzers | 18 (13 codebase + 5 memory) |
+| Total analyzers | 19 (13 codebase + 6 memory) |
 | Targeted queries | 4 (context, impact, outline, brief) |
 | Cross-domain modes | 3 (xanalyze, xsteer, xcontext) |
 | Memory operations | 12 |
 | Fiber operations | 8 |
 | Safety checks | 2 (cycle prevention, fiber compatibility) |
-| Fixture baseline | 33 fixture minimal + 2 portable integration smoke PASS |
-| Betti-preservation | β₁_reasoning = 0 (terjaga di semua operasi) |
+| Fixture baseline | 35 fixture minimal + 2 portable integration smoke PASS |
+| Directed-cycle safety | 0 directed reasoning witness untuk safe bridge |
 | Zero-dependency | Python 3 stdlib only |
 
 ---

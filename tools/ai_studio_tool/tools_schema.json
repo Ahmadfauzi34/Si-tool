@@ -1,7 +1,7 @@
 [
   {
     "name": "hott_kernel",
-    "description": "Unified HoTT Kernel: single entry point untuk seluruh analisis codebase dan memory store. Menjalankan 13 codebase analyzer (topo, perf, hott) dan 5 memory analyzer. Persistent SharedGraph cache memakai invalidasi file-level; persistent analyzer-evidence cache memakai exact semantic-graph + engine signature. Keduanya membawa provenance reuse/execution. Mode 'context' membuat query-directed context pack dengan graph evidence, quotient boundary, provenance, dan hard budget. Mode 'cache' menginspeksi, me-refresh, atau membersihkan kedua lapis cache. Mode 'analyze' untuk findings, 'synthesize' untuk fingerprint + health score + correlations, 'steer' untuk drift detection + steering signals, 'establish' untuk baseline, 'impact'/'outline'/'brief' untuk targeted file analysis, 'memory_*' untuk memory domain, 'xanalyze'/'xsteer'/'xcontext' untuk cross-domain intelligence.",
+    "description": "Unified HoTT Kernel: single entry point untuk seluruh analisis codebase dan memory store. Menjalankan 13 codebase analyzer (topo, perf, hott) dan 6 memory analyzer. Persistent SharedGraph cache memakai invalidasi file-level; persistent analyzer-evidence cache memakai exact semantic-graph + engine signature. Project-scoped memory memakai locking, atomic JSON, backup recovery, dan dedup observasi. Mode 'context' membuat query-directed context pack dengan graph evidence, scoped memory evidence, quotient boundary, provenance, dan hard budget. Mode 'cache' menginspeksi, me-refresh, atau membersihkan kedua lapis cache. Mode 'analyze' untuk findings, 'synthesize' untuk fingerprint + health score + correlations, 'steer' untuk drift detection + steering signals, 'establish' untuk baseline, 'impact'/'outline'/'brief' untuk targeted file analysis, 'memory_*' untuk memory domain, 'xanalyze'/'xsteer'/'xcontext' untuk cross-domain intelligence.",
     "parameters": {
       "type": "OBJECT",
       "properties": {
@@ -44,6 +44,18 @@
         "cache_mode": {
           "type": "STRING",
           "description": "Kebijakan dua lapis cache untuk mode codebase: auto | refresh | off. Default auto. Snapshot berisi salinan source; analyzer cache berisi evidence turunan. Keduanya disimpan lokal di data/codebase/cache milik tool."
+        },
+        "memory_project_root": {
+          "type": "STRING",
+          "description": "Project root untuk isolasi runtime memory. Setara --memory-project-root atau AI_STUDIO_PROJECT_ROOT."
+        },
+        "memory_scope": {
+          "type": "STRING",
+          "description": "Nama scope stabil eksplisit. Gunakan hanya bila state memang sengaja diasosiasikan ke identitas tersebut."
+        },
+        "memory_state_dir": {
+          "type": "STRING",
+          "description": "Root lokal privat untuk runtime memory/fiber. Default data/runtime di dalam bundle tool; selalu Git-ignored."
         },
         "analyzers": {
           "type": "STRING",

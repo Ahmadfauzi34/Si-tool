@@ -1,18 +1,79 @@
 """
 Memory Graph Builder — HoTT Kernel Memory Domain
-Schema Version: 4.0.0-memory
+Schema Version: 4.1.0-memory
 
 Membangun graph dari memory store.
 Setara dengan shared_graph.py untuk codebase.
 """
 
-import json
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Set, Tuple
 
 try:
-    from memory.store import load_store, MEMORY_STORE_PATH
+    from memory.store import load_store
 except ImportError:
-    from memory_store import load_store, MEMORY_STORE_PATH
+    from memory_store import load_store
+
+
+MEMORY_GRAPH_MODEL = "memory_association_multigraph_1_complex"
+
+
+def _build_association_views(
+    memory_map: Dict[str, Dict[str, Any]],
+    associations: List[Dict[str, Any]],
+) -> Tuple[
+    List[Tuple[str, str]],
+    List[Dict[str, Any]],
+    Dict[Tuple[str, str], str],
+    Dict[Tuple[str, str], List[str]],
+    Dict[str, Dict[str, Any]],
+    Dict[str, Set[str]],
+]:
+    """Preserve every association as a distinct 1-cell."""
+    edges: List[Tuple[str, str]] = []
+    edge_records: List[Dict[str, Any]] = []
+    edge_types: Dict[Tuple[str, str], str] = {}
+    edge_types_by_pair: Dict[Tuple[str, str], List[str]] = {}
+    association_map: Dict[str, Dict[str, Any]] = {}
+    adjacency: Dict[str, Set[str]] = {}
+
+    for association in associations:
+        from_id = association.get("from", "")
+        to_id = association.get("to", "")
+        if from_id not in memory_map or to_id not in memory_map:
+            continue
+        association_id = str(association.get("id", ""))
+        association_type = str(association.get("type", "semantic"))
+        pair = (from_id, to_id)
+        edges.append(pair)
+        edge_records.append({
+            "association_id": association_id,
+            "from": from_id,
+            "to": to_id,
+            "type": association_type,
+        })
+        # Compatibility view; use edge_types_by_pair/edge_records for exact math.
+        edge_types[pair] = association_type
+        edge_types_by_pair.setdefault(pair, []).append(association_type)
+        adjacency.setdefault(from_id, set()).add(to_id)
+        adjacency.setdefault(to_id, set()).add(from_id)
+        if association_id:
+            association_map[association_id] = association
+
+    edge_records.sort(
+        key=lambda item: (
+            item["from"], item["to"], item["type"], item["association_id"]
+        )
+    )
+    for pair in edge_types_by_pair:
+        edge_types_by_pair[pair].sort()
+    return (
+        sorted(edges),
+        edge_records,
+        edge_types,
+        edge_types_by_pair,
+        association_map,
+        adjacency,
+    )
 
 
 def build_memory_graph(include_archived: bool = False) -> Dict[str, Any]:
@@ -66,23 +127,14 @@ def build_memory_graph(include_archived: bool = False) -> Dict[str, Any]:
             "is_consolidated": memory.get("consolidated_into") is not None,
         }
 
-    # Build edges and adjacency
-    edges: List[Tuple[str, str]] = []
-    edge_types: Dict[Tuple[str, str], str] = {}
-    adjacency: Dict[str, Set[str]] = {}
-    association_map: Dict[str, Dict[str, Any]] = {}
-
-    for assoc in associations:
-        from_id = assoc.get("from", "")
-        to_id = assoc.get("to", "")
-        assoc_type = assoc.get("type", "semantic")
-
-        if from_id in memory_map and to_id in memory_map:
-            edges.append((from_id, to_id))
-            edge_types[(from_id, to_id)] = assoc_type
-            adjacency.setdefault(from_id, set()).add(to_id)
-            adjacency.setdefault(to_id, set()).add(from_id)
-            association_map[assoc["id"]] = assoc
+    (
+        edges,
+        edge_records,
+        edge_types,
+        edge_types_by_pair,
+        association_map,
+        adjacency,
+    ) = _build_association_views(memory_map, associations)
 
     # Convert sets to sorted lists
     adjacency_list = {k: sorted(v) for k, v in adjacency.items()}
@@ -105,10 +157,19 @@ def build_memory_graph(include_archived: bool = False) -> Dict[str, Any]:
         by_type[t] = by_type.get(t, 0) + 1
 
     return {
-        "schema_version": "4.0.0-memory",
+        "schema_version": "4.1.0-memory",
+        "model": {
+            "name": MEMORY_GRAPH_MODEL,
+            "vertices": "memory records",
+            "one_cells": "association records with multiplicity preserved",
+            "betti_semantics": "underlying undirected multigraph cycle rank",
+            "not_directed_cycle_count": True,
+        },
         "vertices": sorted(vertices),
-        "edges": sorted(set(edges)),
+        "edges": edges,
+        "edge_records": edge_records,
         "edge_types": edge_types,
+        "edge_types_by_pair": edge_types_by_pair,
         "memory_map": memory_map,
         "association_map": association_map,
         "adjacency": adjacency_list,
@@ -117,7 +178,7 @@ def build_memory_graph(include_archived: bool = False) -> Dict[str, Any]:
             "total_memories": len(vertices),
             "total_associations": len(edges),
             "by_type": by_type,
-            "by_edge_type": _count_edge_types(edge_types),
+            "by_edge_type": _count_edge_types(edge_records),
             "isolated_memories": sum(
                 1 for mid in vertices
                 if fan_in.get(mid, 0) == 0 and fan_out.get(mid, 0) == 0
@@ -126,10 +187,11 @@ def build_memory_graph(include_archived: bool = False) -> Dict[str, Any]:
     }
 
 
-def _count_edge_types(edge_types: Dict[Tuple[str, str], str]) -> Dict[str, int]:
+def _count_edge_types(edge_records: List[Dict[str, Any]]) -> Dict[str, int]:
     """Hitung jumlah edges per type."""
     counts: Dict[str, int] = {}
-    for etype in edge_types.values():
+    for record in edge_records:
+        etype = str(record.get("type", "semantic"))
         counts[etype] = counts.get(etype, 0) + 1
     return counts
 
@@ -170,19 +232,14 @@ def build_memory_graph_from_data(
             "is_consolidated": memory.get("consolidated_into") is not None,
         }
 
-    edges: List[Tuple[str, str]] = []
-    edge_types: Dict[Tuple[str, str], str] = {}
-    adjacency: Dict[str, Set[str]] = {}
-
-    for assoc in associations:
-        from_id = assoc.get("from", "")
-        to_id = assoc.get("to", "")
-        assoc_type = assoc.get("type", "semantic")
-        if from_id in memory_map and to_id in memory_map:
-            edges.append((from_id, to_id))
-            edge_types[(from_id, to_id)] = assoc_type
-            adjacency.setdefault(from_id, set()).add(to_id)
-            adjacency.setdefault(to_id, set()).add(from_id)
+    (
+        edges,
+        edge_records,
+        edge_types,
+        edge_types_by_pair,
+        association_map,
+        adjacency,
+    ) = _build_association_views(memory_map, associations)
 
     adjacency_list = {k: sorted(v) for k, v in adjacency.items()}
 
@@ -197,16 +254,26 @@ def build_memory_graph_from_data(
         node_metadata[mid]["fan_out"] = fan_out.get(mid, 0)
 
     return {
-        "schema_version": "4.0.0-memory",
+        "schema_version": "4.1.0-memory",
+        "model": {
+            "name": MEMORY_GRAPH_MODEL,
+            "vertices": "memory records",
+            "one_cells": "association records with multiplicity preserved",
+            "betti_semantics": "underlying undirected multigraph cycle rank",
+            "not_directed_cycle_count": True,
+        },
         "vertices": sorted(vertices),
-        "edges": sorted(set(edges)),
+        "edges": edges,
+        "edge_records": edge_records,
         "edge_types": edge_types,
+        "edge_types_by_pair": edge_types_by_pair,
         "memory_map": memory_map,
+        "association_map": association_map,
         "adjacency": adjacency_list,
         "node_metadata": node_metadata,
         "summary": {
             "total_memories": len(vertices),
             "total_associations": len(edges),
-            "by_edge_type": _count_edge_types(edge_types),
+            "by_edge_type": _count_edge_types(edge_records),
         },
     }

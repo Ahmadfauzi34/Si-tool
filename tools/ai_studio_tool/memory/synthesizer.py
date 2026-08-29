@@ -1,6 +1,6 @@
 """
 Memory Synthesizer — HoTT Kernel Memory Domain
-Schema Version: 4.0.0-memory
+Schema Version: 4.1.0-memory
 
 Fungsi:
 1. Memory steering signals (reasoning strategy dari topologi memori)
@@ -9,20 +9,19 @@ Fungsi:
 4. Memory steering prompt block assembly
 """
 
-import os
 import json
 import math
 import hashlib
 import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-SCHEMA_VERSION = "4.0.0-memory"
+from memory.runtime import (
+    memory_runtime_lock,
+    read_json_unlocked,
+    write_json_unlocked,
+)
 
-_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-_TOOL_ROOT = os.path.dirname(_SCRIPT_DIR) if os.path.basename(_SCRIPT_DIR) == "memory" else _SCRIPT_DIR
-DATA_BASELINE_DIR = os.path.join(_TOOL_ROOT, "data", "memory", "baseline")
-MEMORY_BASELINE_DIR = DATA_BASELINE_DIR if os.path.exists(DATA_BASELINE_DIR) else os.path.join(_TOOL_ROOT, "memory", "baseline")
-MEMORY_BASELINE_PATH = os.path.join(MEMORY_BASELINE_DIR, "memory_baseline.json")
+SCHEMA_VERSION = "4.1.0-memory"
 
 # Mapping archetype → reasoning strategy untuk memory domain
 MEMORY_ARCHETYPE_STRATEGY = {
@@ -38,13 +37,13 @@ MEMORY_ARCHETYPE_STRATEGY = {
     ),
     "memory_sparse_cyclic": (
         "cycle_aware_recall",
-        "Connected memory with sparse cycles. Verify you're not looping "
-        "through the same reasoning before proceeding."
+        "Connected memory with sparse association cycle rank. Inspect edge "
+        "types and directed witnesses before calling it circular reasoning."
     ),
     "memory_mixed_cyclic": (
         "path_enumeration",
-        "Moderate interconnection with cycles. Enumerate reasoning paths "
-        "before committing to a conclusion."
+        "Moderate association interconnection. Enumerate relevant paths and "
+        "keep undirected cycle rank separate from directed reasoning loops."
     ),
     "memory_dense_mesh": (
         "conservative_recall",
@@ -109,6 +108,11 @@ def compute_memory_fingerprint(
 
     return {
         "signature_hash": signature_hash,
+        "topological_model": manifold_data.get(
+            "model", "memory_association_multigraph_1_complex"
+        ),
+        "beta_1_semantics": "underlying undirected multigraph cycle rank",
+        "beta_1_is_not_directed_cycle_count": True,
         "invariant_vector": invariant_vector,
         "betti_numbers": betti,
         "memory_archetype": archetype,
@@ -126,11 +130,11 @@ def establish_memory_baseline(
     health_score: float,
 ) -> Dict[str, Any]:
     """Simpan memory fingerprint sebagai baseline."""
-    os.makedirs(MEMORY_BASELINE_DIR, exist_ok=True)
-
     baseline = {
         "schema_version": SCHEMA_VERSION,
-        "established_at": datetime.datetime.utcnow().isoformat() + "Z",
+        "established_at": datetime.datetime.now(
+            datetime.timezone.utc
+        ).isoformat().replace("+00:00", "Z"),
         "signature_hash": fingerprint["signature_hash"],
         "invariant_vector": fingerprint["invariant_vector"],
         "betti_numbers": fingerprint["betti_numbers"],
@@ -138,21 +142,23 @@ def establish_memory_baseline(
         "health_score": health_score,
     }
 
-    with open(MEMORY_BASELINE_PATH, "w", encoding="utf-8") as f:
-        json.dump(baseline, f, indent=2, ensure_ascii=False)
+    with memory_runtime_lock() as paths:
+        write_json_unlocked(paths["baseline_path"], baseline)
+        baseline_path = paths["baseline_path"]
 
-    return {"status": "established", "baseline_path": MEMORY_BASELINE_PATH, "baseline": baseline}
+    return {"status": "established", "baseline_path": baseline_path, "baseline": baseline}
 
 
 def load_memory_baseline() -> Optional[Dict[str, Any]]:
     """Load memory baseline dari file."""
-    if not os.path.isfile(MEMORY_BASELINE_PATH):
-        return None
-    try:
-        with open(MEMORY_BASELINE_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return None
+    def validate(value: Any) -> None:
+        if not isinstance(value, dict):
+            raise ValueError("memory baseline must be an object")
+        if "signature_hash" not in value or "invariant_vector" not in value:
+            raise ValueError("memory baseline is missing required fields")
+
+    with memory_runtime_lock() as paths:
+        return read_json_unlocked(paths["baseline_path"], lambda: None, validate)
 
 
 # ============================================================
@@ -227,6 +233,7 @@ def generate_memory_steering_signals(
     fingerprint: Dict[str, Any],
     drift: Dict[str, Any],
     health_score: float,
+    directed_reasoning_cycle_witness_count: int = 0,
 ) -> Dict[str, Any]:
     """Hasilkan steering signals dari memory topology."""
     archetype = fingerprint.get("memory_archetype", "empty")
@@ -256,7 +263,9 @@ def generate_memory_steering_signals(
     if betti.get("beta_0", 0) > 1:
         attention.append("knowledge_fragmentation")
     if betti.get("beta_1", 0) > 0:
-        attention.append("circular_reasoning_present")
+        attention.append("association_cycle_rank_present")
+    if directed_reasoning_cycle_witness_count > 0:
+        attention.append("directed_circular_reasoning_witness_present")
     if betti.get("beta_2", 0) > 0:
         attention.append("missing_abstraction")
     if health_score < 0.5:
@@ -273,6 +282,12 @@ def generate_memory_steering_signals(
             "health_score": health_score,
             "connected_components": betti.get("beta_0", 0),
             "independent_cycles": betti.get("beta_1", 0),
+            "association_cycle_rank": betti.get("beta_1", 0),
+            "beta_1_semantics": "underlying undirected multigraph cycle rank",
+            "beta_1_is_not_directed_cycle_count": True,
+            "directed_reasoning_cycle_witness_count": (
+                directed_reasoning_cycle_witness_count
+            ),
             "enclosed_voids": betti.get("beta_2", 0),
         },
     }
@@ -306,6 +321,12 @@ def assemble_memory_prompt_block(
         f"drift={drift_status}",
         f"regrounding={'true' if signals['regrounding_needed'] else 'false'}",
         f"beta_0={betti.get('beta_0', 0)} beta_1={betti.get('beta_1', 0)} beta_2={betti.get('beta_2', 0)}",
+        "beta_1_semantics=underlying undirected association multigraph cycle rank; "
+        "not directed circular-reasoning count",
+        (
+            "directed_reasoning_cycle_witness_count="
+            f"{signals.get('structural_context', {}).get('directed_reasoning_cycle_witness_count', 0)}"
+        ),
         f"signature={fingerprint.get('signature_hash', 'unknown')}",
         "[MEMORY CONTEXT]",
         signals.get("strategy_description", ""),

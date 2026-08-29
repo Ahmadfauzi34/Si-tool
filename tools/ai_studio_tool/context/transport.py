@@ -1,6 +1,6 @@
 """
 Parallel Transport — Fibration Context Domain
-Schema Version: 4.0.0-memory
+Schema Version: 4.1.0-memory
 """
 
 from context.fibration import (

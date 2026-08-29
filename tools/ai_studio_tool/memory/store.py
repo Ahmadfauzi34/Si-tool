@@ -1,49 +1,67 @@
 """
 Memory Store — HoTT Kernel Memory Domain
-Schema Version: 4.0.0-memory
+Schema Version: 4.1.0-memory
 
-File-based memory storage engine.
+Project-scoped durable memory storage engine.
 Supports episodic, semantic, and procedural memory types.
 """
 
-import os
-import json
+import copy
+import re
 import uuid
 import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
-SCHEMA_VERSION = "4.0.0-memory"
+from memory.runtime import (
+    get_memory_runtime_paths,
+    memory_runtime_lock,
+    memory_runtime_provenance,
+    read_json_unlocked,
+    write_json_unlocked,
+)
 
-_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-_TOOL_ROOT = os.path.dirname(_SCRIPT_DIR) if os.path.basename(_SCRIPT_DIR) == "memory" else _SCRIPT_DIR
+SCHEMA_VERSION = "4.1.0-memory"
 
-DATA_DIR = os.path.join(_TOOL_ROOT, "data", "memory")
-MEMORY_DIR = DATA_DIR if os.path.exists(DATA_DIR) else os.path.join(_TOOL_ROOT, "memory")
-MEMORY_STORE_PATH = os.path.join(MEMORY_DIR, "memory_store.json")
-BASELINE_DIR = os.path.join(MEMORY_DIR, "baseline")
-BASELINE_PATH = os.path.join(BASELINE_DIR, "memory_baseline.json")
-CONSOLIDATION_LOG_PATH = os.path.join(MEMORY_DIR, "consolidation_log.json")
+# Compatibility constants are snapshots of the initial process scope. Runtime
+# operations resolve paths dynamically so CLI configuration can select a scope.
+_INITIAL_PATHS = get_memory_runtime_paths(create=False)
+MEMORY_STORE_PATH = _INITIAL_PATHS["store_path"]
+BASELINE_PATH = _INITIAL_PATHS["baseline_path"]
+CONSOLIDATION_LOG_PATH = _INITIAL_PATHS["consolidation_log_path"]
 
 MEMORY_TYPES = ("episodic", "semantic", "procedural")
 ASSOCIATION_TYPES = (
     "temporal", "causal", "semantic", "inferential",
     "consolidation", "derivation", "contradiction", "redundancy"
 )
+REASONING_EDGE_TYPES = {"inferential", "causal"}
 
 # Status memory untuk quotient forgetting
 MEMORY_STATUS_ACTIVE = "active"
 MEMORY_STATUS_ARCHIVED = "archived"
 
 
+class ReasoningCycleRejectedError(ValueError):
+    """A reasoning association would close a directed path."""
+
+    error_code = "would_create_reasoning_cycle"
+
+    def __init__(self, from_id: str, to_id: str, assoc_type: str) -> None:
+        super().__init__(
+            f"Association {from_id} --{assoc_type}--> {to_id} would create "
+            "a directed reasoning cycle"
+        )
+        self.details = {
+            "from_id": from_id,
+            "to_id": to_id,
+            "association_type": assoc_type,
+            "safe_mode": True,
+        }
+
+
 def _get_status(memory: Dict[str, Any]) -> str:
     """Ambil status memory dengan backward compatibility."""
     return memory.get("status", MEMORY_STATUS_ACTIVE)
-
-
-def _ensure_dirs():
-    """Pastikan direktori memory ada."""
-    os.makedirs(MEMORY_DIR, exist_ok=True)
-    os.makedirs(BASELINE_DIR, exist_ok=True)
 
 
 def _generate_id(memory_type: str) -> str:
@@ -55,39 +73,129 @@ def _generate_id(memory_type: str) -> str:
 
 
 def _now_iso() -> str:
-    return datetime.datetime.utcnow().isoformat() + "Z"
+    return datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _default_store() -> Dict[str, Any]:
+    now = _now_iso()
+    paths = get_memory_runtime_paths(create=True)
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "created_at": now,
+        "updated_at": now,
+        "scope": {
+            "scope_id": paths["scope_id"],
+            "scope_kind": paths["scope_kind"],
+            "scope_name": paths["scope_name"],
+        },
+        "memories": [],
+        "associations": [],
+        "events": [],
+    }
+
+
+def _validate_store(store: Any) -> None:
+    if not isinstance(store, dict):
+        raise ValueError("memory store root must be an object")
+    if not isinstance(store.get("memories"), list):
+        raise ValueError("memory store 'memories' must be a list")
+    if not isinstance(store.get("associations"), list):
+        raise ValueError("memory store 'associations' must be a list")
+    memory_ids = [item.get("id") for item in store["memories"] if isinstance(item, dict)]
+    if len(memory_ids) != len(store["memories"]) or any(not mid for mid in memory_ids):
+        raise ValueError("every memory must be an object with a non-empty id")
+    if len(memory_ids) != len(set(memory_ids)):
+        raise ValueError("memory ids must be unique")
+    dedup_keys = [
+        item.get("context", {}).get("dedup_key")
+        for item in store["memories"]
+        if item.get("context", {}).get("dedup_key")
+    ]
+    if len(dedup_keys) != len(set(dedup_keys)):
+        raise ValueError("memory observation dedup keys must be unique")
+    known_ids = set(memory_ids)
+    association_ids: List[str] = []
+    for association in store["associations"]:
+        if not isinstance(association, dict) or not association.get("id"):
+            raise ValueError("every association must have an id")
+        association_ids.append(str(association["id"]))
+        if association.get("from") not in known_ids or association.get("to") not in known_ids:
+            raise ValueError("association endpoints must reference existing memories")
+    if len(association_ids) != len(set(association_ids)):
+        raise ValueError("association ids must be unique")
+    if "events" in store and not isinstance(store["events"], list):
+        raise ValueError("memory store 'events' must be a list")
+
+
+def _normalize_store(store: Dict[str, Any]) -> Dict[str, Any]:
+    """Migrate older valid stores in memory without treating migration as learning."""
+    store.setdefault("created_at", _now_iso())
+    store.setdefault("updated_at", store["created_at"])
+    store.setdefault("events", [])
+    paths = get_memory_runtime_paths(create=True)
+    store["scope"] = {
+        "scope_id": paths["scope_id"],
+        "scope_kind": paths["scope_kind"],
+        "scope_name": paths["scope_name"],
+    }
+    store["schema_version"] = SCHEMA_VERSION
+    return store
+
+
+def _load_store_unlocked(paths: Dict[str, Any]) -> Dict[str, Any]:
+    store = read_json_unlocked(paths["store_path"], _default_store, _validate_store)
+    return _normalize_store(store)
+
+
+def _mutate_store(mutator: Callable[[Dict[str, Any]], Any]) -> Any:
+    """Run one read-modify-write transaction under the project-scope lock."""
+    with memory_runtime_lock() as paths:
+        store = _load_store_unlocked(paths)
+        result = mutator(store)
+        store["updated_at"] = _now_iso()
+        _validate_store(store)
+        write_json_unlocked(paths["store_path"], store)
+        return result
 
 
 def load_store() -> Dict[str, Any]:
-    """Load memory store dari file."""
-    _ensure_dirs()
-    if not os.path.isfile(MEMORY_STORE_PATH):
-        return {
-            "schema_version": SCHEMA_VERSION,
-            "created_at": _now_iso(),
-            "updated_at": _now_iso(),
-            "memories": [],
-            "associations": [],
-        }
-    try:
-        with open(MEMORY_STORE_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {
-            "schema_version": SCHEMA_VERSION,
-            "created_at": _now_iso(),
-            "updated_at": _now_iso(),
-            "memories": [],
-            "associations": [],
-        }
+    """Load the current project-scoped store with corruption recovery."""
+    with memory_runtime_lock() as paths:
+        return _load_store_unlocked(paths)
 
 
 def save_store(store: Dict[str, Any]) -> None:
-    """Simpan memory store ke file."""
-    _ensure_dirs()
-    store["updated_at"] = _now_iso()
-    with open(MEMORY_STORE_PATH, "w", encoding="utf-8") as f:
-        json.dump(store, f, indent=2, ensure_ascii=False)
+    """Atomically replace the scoped store (compatibility API)."""
+    replacement = copy.deepcopy(store)
+    replacement["updated_at"] = _now_iso()
+    _normalize_store(replacement)
+    _validate_store(replacement)
+    with memory_runtime_lock() as paths:
+        write_json_unlocked(paths["store_path"], replacement)
+
+
+def _new_memory_record(
+    memory_type: str,
+    content: str,
+    source: str,
+    importance: float,
+    tags: Optional[List[str]],
+    context: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    now = _now_iso()
+    return {
+        "id": _generate_id(memory_type),
+        "type": memory_type,
+        "content": content,
+        "source": source,
+        "timestamp": now,
+        "importance": max(0.0, min(1.0, importance)),
+        "access_count": 0,
+        "last_accessed": now,
+        "tags": sorted(set(tags or [])),
+        "context": context or {},
+        "consolidated_into": None,
+    }
 
 
 def store_memory(
@@ -102,26 +210,155 @@ def store_memory(
     if memory_type not in MEMORY_TYPES:
         raise ValueError(f"Invalid memory type: {memory_type}. Must be one of {MEMORY_TYPES}")
 
-    store = load_store()
-    memory_id = _generate_id(memory_type)
+    memory = _new_memory_record(memory_type, content, source, importance, tags, context)
 
-    memory = {
-        "id": memory_id,
-        "type": memory_type,
-        "content": content,
-        "source": source,
-        "timestamp": _now_iso(),
-        "importance": max(0.0, min(1.0, importance)),
-        "access_count": 0,
-        "last_accessed": _now_iso(),
-        "tags": tags or [],
-        "context": context or {},
-        "consolidated_into": None,
-    }
+    def append(store: Dict[str, Any]) -> Dict[str, Any]:
+        store["memories"].append(memory)
+        return copy.deepcopy(memory)
 
-    store["memories"].append(memory)
-    save_store(store)
-    return memory
+    return _mutate_store(append)
+
+
+def upsert_memory_observations(
+    observations: List[Dict[str, Any]],
+    *,
+    link_type: str = "temporal",
+    link_strength: float = 0.6,
+) -> Dict[str, Any]:
+    """Atomically store or re-observe deterministic analyzer evidence.
+
+    ``dedup_key`` is mandatory for every observation. Re-observation updates
+    timestamps and counters on the same node rather than adding a duplicate
+    point to the memory graph.
+    """
+    if link_type not in ASSOCIATION_TYPES:
+        raise ValueError(f"Invalid association type: {link_type}")
+    for observation in observations:
+        if not observation.get("dedup_key"):
+            raise ValueError("Every observation requires a dedup_key")
+        if observation.get("memory_type", "episodic") not in MEMORY_TYPES:
+            raise ValueError(f"Invalid memory type: {observation.get('memory_type')}")
+
+    input_count = len(observations)
+    unique_by_key: Dict[str, Dict[str, Any]] = {}
+    for observation in observations:
+        dedup_key = str(observation["dedup_key"])
+        if dedup_key not in unique_by_key:
+            unique_by_key[dedup_key] = copy.deepcopy(observation)
+            continue
+        existing = unique_by_key[dedup_key]
+        existing["tags"] = sorted(
+            set(existing.get("tags", [])) | set(observation.get("tags", []))
+        )
+        existing["importance"] = max(
+            float(existing.get("importance", 0.5)),
+            float(observation.get("importance", 0.5)),
+        )
+        existing_context = existing.setdefault("context", {})
+        existing_context.update(copy.deepcopy(observation.get("context") or {}))
+    unique_observations = list(unique_by_key.values())
+
+    def upsert(store: Dict[str, Any]) -> Dict[str, Any]:
+        now = _now_iso()
+        by_key = {
+            memory.get("context", {}).get("dedup_key"): memory
+            for memory in store["memories"]
+            if memory.get("context", {}).get("dedup_key")
+        }
+        stored_ids: List[str] = []
+        reused_ids: List[str] = []
+        observed_ids: List[str] = []
+
+        for observation in unique_observations:
+            dedup_key = str(observation["dedup_key"])
+            context = copy.deepcopy(observation.get("context") or {})
+            context["dedup_key"] = dedup_key
+            existing = by_key.get(dedup_key)
+            if existing is not None:
+                existing_context = existing.setdefault("context", {})
+                previous_signature = existing_context.get("evidence_signature")
+                if previous_signature:
+                    existing_context.setdefault("first_evidence_signature", previous_signature)
+                existing_context.update(context)
+                current_signature = context.get("evidence_signature")
+                if current_signature:
+                    existing_context.setdefault("first_evidence_signature", current_signature)
+                    existing_context["last_evidence_signature"] = current_signature
+                existing_context.setdefault("first_observed_at", existing.get("timestamp", now))
+                existing_context["last_observed_at"] = now
+                existing_context["observation_count"] = int(
+                    existing_context.get("observation_count", 1)
+                ) + 1
+                existing["content"] = str(observation.get("content", existing.get("content", "")))
+                existing["source"] = str(observation.get("source", existing.get("source", "manual")))
+                existing["importance"] = max(
+                    float(existing.get("importance", 0.0)),
+                    max(0.0, min(1.0, float(observation.get("importance", 0.5)))),
+                )
+                existing["tags"] = sorted(set(existing.get("tags", [])) | set(observation.get("tags", [])))
+                if _get_status(existing) == MEMORY_STATUS_ARCHIVED:
+                    existing["status"] = MEMORY_STATUS_ACTIVE
+                    existing.pop("archived_at", None)
+                    existing.pop("archive_reason", None)
+                reused_ids.append(existing["id"])
+                observed_ids.append(existing["id"])
+                continue
+
+            context.setdefault("first_observed_at", now)
+            context["last_observed_at"] = now
+            context["observation_count"] = 1
+            if context.get("evidence_signature"):
+                context["first_evidence_signature"] = context["evidence_signature"]
+                context["last_evidence_signature"] = context["evidence_signature"]
+            memory = _new_memory_record(
+                observation.get("memory_type", "episodic"),
+                str(observation.get("content", "")),
+                str(observation.get("source", "observation")),
+                float(observation.get("importance", 0.5)),
+                list(observation.get("tags", [])),
+                context,
+            )
+            store["memories"].append(memory)
+            by_key[dedup_key] = memory
+            stored_ids.append(memory["id"])
+            observed_ids.append(memory["id"])
+
+        existing_links = {
+            (item.get("from"), item.get("to"), item.get("type"))
+            for item in store["associations"]
+        }
+        associations_created = 0
+        for from_id, to_id in zip(observed_ids, observed_ids[1:]):
+            key = (from_id, to_id, link_type)
+            if from_id == to_id or key in existing_links:
+                continue
+            store["associations"].append({
+                "id": f"assoc_{uuid.uuid4().hex[:8]}",
+                "from": from_id,
+                "to": to_id,
+                "type": link_type,
+                "strength": max(0.0, min(1.0, link_strength)),
+                "created_at": now,
+                "metadata": {"reason": "observation_batch_order"},
+            })
+            existing_links.add(key)
+            associations_created += 1
+
+        return {
+            "status": "observed",
+            "stored_count": len(stored_ids),
+            "reused_count": len(reused_ids),
+            "updated_count": len(reused_ids),
+            "stored_ids": stored_ids,
+            "reused_ids": reused_ids,
+            "observed_ids": observed_ids,
+            "associations_created": associations_created,
+            "input_observation_count": input_count,
+            "unique_observation_count": len(unique_observations),
+            "duplicate_input_count": input_count - len(unique_observations),
+        }
+
+    return _mutate_store(upsert)
 
 
 def store_association(
@@ -130,23 +367,14 @@ def store_association(
     assoc_type: str,
     strength: float = 0.5,
     metadata: Optional[Dict[str, Any]] = None,
+    safe_mode: bool = True,
 ) -> Dict[str, Any]:
     """Simpan asosiasi antara dua memori."""
     if assoc_type not in ASSOCIATION_TYPES:
         raise ValueError(f"Invalid association type: {assoc_type}")
 
-    store = load_store()
-
-    # Validasi bahwa kedua memori ada
-    memory_ids = {m["id"] for m in store["memories"]}
-    if from_id not in memory_ids:
-        raise ValueError(f"Memory not found: {from_id}")
-    if to_id not in memory_ids:
-        raise ValueError(f"Memory not found: {to_id}")
-
-    assoc_id = f"assoc_{uuid.uuid4().hex[:8]}"
     association = {
-        "id": assoc_id,
+        "id": f"assoc_{uuid.uuid4().hex[:8]}",
         "from": from_id,
         "to": to_id,
         "type": assoc_type,
@@ -155,9 +383,22 @@ def store_association(
         "metadata": metadata or {},
     }
 
-    store["associations"].append(association)
-    save_store(store)
-    return association
+    def append(store: Dict[str, Any]) -> Dict[str, Any]:
+        memory_ids = {m["id"] for m in store["memories"]}
+        if from_id not in memory_ids:
+            raise ValueError(f"Memory not found: {from_id}")
+        if to_id not in memory_ids:
+            raise ValueError(f"Memory not found: {to_id}")
+        if (
+            safe_mode
+            and assoc_type in REASONING_EDGE_TYPES
+            and would_create_reasoning_cycle(from_id, to_id, store)
+        ):
+            raise ReasoningCycleRejectedError(from_id, to_id, assoc_type)
+        store["associations"].append(association)
+        return copy.deepcopy(association)
+
+    return _mutate_store(append)
 
 
 def consolidate_memories(
@@ -183,23 +424,19 @@ def consolidate_memories(
     Returns:
         Dict with new semantic memory and consolidation info
     """
-    store = load_store()
-    memory_ids = {m["id"] for m in store["memories"]}
+    if not source_ids:
+        raise ValueError("At least one source memory is required")
+    if len(source_ids) != len(set(source_ids)):
+        raise ValueError("Source memory IDs must be unique")
 
-    # Validasi semua source IDs ada
-    for sid in source_ids:
-        if sid not in memory_ids:
-            raise ValueError(f"Memory not found: {sid}")
-
-    # Buat semantic memory baru (colimit)
     batch_id = f"batch_{uuid.uuid4().hex[:6]}"
-    new_semantic = store_memory(
-        memory_type="semantic",
-        content=content,
-        source=f"consolidation:{','.join(source_ids)}",
-        importance=importance,
-        tags=(tags or []) + ["consolidated"],
-        context={
+    new_semantic = _new_memory_record(
+        "semantic",
+        content,
+        f"consolidation:{','.join(source_ids)}",
+        importance,
+        (tags or []) + ["consolidated"],
+        {
             "consolidated_from": source_ids,
             "pattern_type": pattern_type,
             "confidence": confidence,
@@ -207,35 +444,53 @@ def consolidate_memories(
         },
     )
 
-    # Buat asosiasi consolidation dari setiap source ke semantic baru
-    for sid in source_ids:
-        store_association(
-            from_id=sid,
-            to_id=new_semantic["id"],
-            assoc_type="consolidation",
-            strength=confidence,
-            metadata={
-                "reason": "colimit_construction",
-                "consolidation_batch": batch_id,
-            },
-        )
+    def consolidate(store: Dict[str, Any]) -> Dict[str, Any]:
+        memory_ids = {m["id"] for m in store["memories"]}
+        for source_id in source_ids:
+            if source_id not in memory_ids:
+                raise ValueError(f"Memory not found: {source_id}")
+        store["memories"].append(new_semantic)
+        for source_id in source_ids:
+            store["associations"].append({
+                "id": f"assoc_{uuid.uuid4().hex[:8]}",
+                "from": source_id,
+                "to": new_semantic["id"],
+                "type": "consolidation",
+                "strength": max(0.0, min(1.0, confidence)),
+                "created_at": _now_iso(),
+                "metadata": {
+                    "reason": "colimit_construction",
+                    "consolidation_batch": batch_id,
+                },
+            })
+        for memory in store["memories"]:
+            if memory["id"] in source_ids:
+                memory["consolidated_into"] = new_semantic["id"]
+        store.setdefault("events", []).append({
+            "type": "consolidation",
+            "batch_id": batch_id,
+            "timestamp": _now_iso(),
+            "source_ids": list(source_ids),
+            "target_id": new_semantic["id"],
+            "content_summary": content[:200],
+        })
+        return {
+            "new_semantic_memory": copy.deepcopy(new_semantic),
+            "consolidated_from": list(source_ids),
+            "associations_created": len(source_ids),
+            "consolidation_batch": batch_id,
+            "transactional": True,
+        }
 
-    # Tandai source memories sebagai consolidated
-    store = load_store()  # reload setelah perubahan
-    for memory in store["memories"]:
-        if memory["id"] in source_ids:
-            memory["consolidated_into"] = new_semantic["id"]
-    save_store(store)
-
-    # Log konsolidasi
-    _log_consolidation(batch_id, source_ids, new_semantic["id"], content)
-
-    return {
-        "new_semantic_memory": new_semantic,
-        "consolidated_from": source_ids,
-        "associations_created": len(source_ids),
-        "consolidation_batch": batch_id,
-    }
+    result = _mutate_store(consolidate)
+    try:
+        _log_consolidation(batch_id, source_ids, new_semantic["id"], content)
+        result["external_audit_log"] = "written"
+    except Exception as exc:
+        # The authoritative event is already inside the atomic store transaction.
+        result["external_audit_log"] = "write_failed"
+        result["external_audit_error"] = str(exc)
+    return result
 
 
 def _log_consolidation(
@@ -244,26 +499,21 @@ def _log_consolidation(
     target_id: str,
     content: str,
 ) -> None:
-    """Log konsolidasi untuk audit trail."""
-    log_path = CONSOLIDATION_LOG_PATH
-    log = []
-    if os.path.isfile(log_path):
-        try:
-            with open(log_path, "r", encoding="utf-8") as f:
-                log = json.load(f)
-        except Exception:
-            log = []
+    """Write a derived audit view; authoritative event remains in the store."""
+    def validate_log(value: Any) -> None:
+        if not isinstance(value, list):
+            raise ValueError("consolidation log must be a list")
 
-    log.append({
-        "batch_id": batch_id,
-        "timestamp": _now_iso(),
-        "source_ids": source_ids,
-        "target_id": target_id,
-        "content_summary": content[:200],
-    })
-
-    with open(log_path, "w", encoding="utf-8") as f:
-        json.dump(log, f, indent=2, ensure_ascii=False)
+    with memory_runtime_lock() as paths:
+        log = read_json_unlocked(paths["consolidation_log_path"], list, validate_log)
+        log.append({
+            "batch_id": batch_id,
+            "timestamp": _now_iso(),
+            "source_ids": source_ids,
+            "target_id": target_id,
+            "content_summary": content[:200],
+        })
+        write_json_unlocked(paths["consolidation_log_path"], log)
 
 
 def recall_memories(
@@ -281,7 +531,7 @@ def recall_memories(
     Untuk access tracking, gunakan access_memory().
     """
     store = load_store()
-    results = store["memories"]
+    results = [copy.deepcopy(memory) for memory in store["memories"]]
 
     # Filter archived
     if not include_archived:
@@ -296,30 +546,69 @@ def recall_memories(
     if min_importance > 0:
         results = [m for m in results if m.get("importance", 0) >= min_importance]
 
+    scored: List[Tuple[float, Dict[str, Any]]] = []
     if query:
-        query_lower = query.lower()
-        results = [
-            m for m in results
-            if query_lower in m.get("content", "").lower()
-            or query_lower in " ".join(m.get("tags", [])).lower()
-        ]
-
-    # Sort by importance desc, then timestamp desc
-    results.sort(key=lambda m: (-m.get("importance", 0), m.get("timestamp", "")), reverse=False)
+        normalized_query = " ".join(query.lower().split())
+        query_terms = {
+            token for token in re.findall(r"[a-z0-9]+", normalized_query)
+            if len(token) >= 2
+        }
+        for memory in results:
+            context = memory.get("context", {})
+            searchable = " ".join([
+                str(memory.get("content", "")),
+                str(memory.get("source", "")),
+                " ".join(str(tag) for tag in memory.get("tags", [])),
+                str(context.get("file", "")),
+                str(context.get("finding_type", "")),
+                str(context.get("source_analyzer", "")),
+            ]).lower()
+            searchable_normalized = " ".join(searchable.split())
+            searchable_terms = set(re.findall(r"[a-z0-9]+", searchable_normalized))
+            matched_terms = query_terms & searchable_terms
+            exact = normalized_query in searchable_normalized
+            if not exact and query_terms and not matched_terms:
+                continue
+            if not exact and not query_terms:
+                continue
+            overlap = len(matched_terms) / max(1, len(query_terms))
+            score = (4.0 if exact else 0.0) + 2.0 * overlap + float(memory.get("importance", 0.0))
+            memory["retrieval_match"] = {
+                "model": "lexical_overlap_v1",
+                "score": round(score, 6),
+                "exact_substring": exact,
+                "matched_terms": sorted(matched_terms),
+                "query_term_count": len(query_terms),
+            }
+            scored.append((score, memory))
+        scored.sort(
+            key=lambda item: (
+                -item[0],
+                -float(item[1].get("importance", 0.0)),
+                str(item[1].get("timestamp", "")),
+                str(item[1].get("id", "")),
+            )
+        )
+        results = [memory for _, memory in scored]
+    else:
+        # Stable two-pass sort gives importance desc, then timestamp desc.
+        results.sort(key=lambda memory: str(memory.get("timestamp", "")), reverse=True)
+        results.sort(key=lambda memory: float(memory.get("importance", 0.0)), reverse=True)
 
     return results[:limit]
 
 
 def access_memory(memory_id: str) -> Optional[Dict[str, Any]]:
     """Tandai memori sebagai diakses (update access_count dan last_accessed)."""
-    store = load_store()
-    for memory in store["memories"]:
-        if memory["id"] == memory_id:
-            memory["access_count"] = memory.get("access_count", 0) + 1
-            memory["last_accessed"] = _now_iso()
-            save_store(store)
-            return memory
-    return None
+    def access(store: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        for memory in store["memories"]:
+            if memory["id"] == memory_id:
+                memory["access_count"] = memory.get("access_count", 0) + 1
+                memory["last_accessed"] = _now_iso()
+                return copy.deepcopy(memory)
+        return None
+
+    return _mutate_store(access)
 
 
 def get_memory(memory_id: str) -> Optional[Dict[str, Any]]:
@@ -356,13 +645,18 @@ def get_memory_stats() -> Dict[str, Any]:
         t = a.get("type", "unknown")
         by_assoc_type[t] = by_assoc_type.get(t, 0) + 1
 
+    active_count = sum(1 for memory in memories if _get_status(memory) == MEMORY_STATUS_ACTIVE)
+    archived_count = len(memories) - active_count
     return {
         "total_memories": len(memories),
+        "active_memories": active_count,
+        "archived_memories": archived_count,
         "total_associations": len(associations),
         "by_type": by_type,
         "by_association_type": by_assoc_type,
         "schema_version": store.get("schema_version", "unknown"),
         "updated_at": store.get("updated_at", "unknown"),
+        "runtime": memory_runtime_provenance(),
     }
 
 
@@ -550,42 +844,45 @@ def archive_memory(memory_id: str, reason: str = "consolidated") -> Optional[Dic
     Archive satu memory (quotient forgetting).
     Memory tidak dihapus, hanya ditandai sebagai archived.
     """
-    store = load_store()
-    for memory in store["memories"]:
-        if memory["id"] == memory_id:
-            memory["status"] = MEMORY_STATUS_ARCHIVED
-            memory["archived_at"] = _now_iso()
-            memory["archive_reason"] = reason
-            save_store(store)
-            return memory
-    return None
+    def archive(store: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        for memory in store["memories"]:
+            if memory["id"] == memory_id:
+                memory["status"] = MEMORY_STATUS_ARCHIVED
+                memory["archived_at"] = _now_iso()
+                memory["archive_reason"] = reason
+                return copy.deepcopy(memory)
+        return None
+
+    return _mutate_store(archive)
 
 
 def restore_memory(memory_id: str) -> Optional[Dict[str, Any]]:
     """Restore satu archived memory kembali aktif."""
-    store = load_store()
-    for memory in store["memories"]:
-        if memory["id"] == memory_id:
-            memory["status"] = MEMORY_STATUS_ACTIVE
-            memory.pop("archived_at", None)
-            memory.pop("archive_reason", None)
-            save_store(store)
-            return memory
-    return None
+    def restore(store: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        for memory in store["memories"]:
+            if memory["id"] == memory_id:
+                memory["status"] = MEMORY_STATUS_ACTIVE
+                memory.pop("archived_at", None)
+                memory.pop("archive_reason", None)
+                return copy.deepcopy(memory)
+        return None
+
+    return _mutate_store(restore)
 
 
 def restore_all_archived() -> Dict[str, Any]:
     """Restore semua archived memories."""
-    store = load_store()
-    restored_count = 0
-    for memory in store["memories"]:
-        if _get_status(memory) == MEMORY_STATUS_ARCHIVED:
-            memory["status"] = MEMORY_STATUS_ACTIVE
-            memory.pop("archived_at", None)
-            memory.pop("archive_reason", None)
-            restored_count += 1
-    save_store(store)
-    return {"restored_count": restored_count}
+    def restore(store: Dict[str, Any]) -> Dict[str, Any]:
+        restored_count = 0
+        for memory in store["memories"]:
+            if _get_status(memory) == MEMORY_STATUS_ARCHIVED:
+                memory["status"] = MEMORY_STATUS_ACTIVE
+                memory.pop("archived_at", None)
+                memory.pop("archive_reason", None)
+                restored_count += 1
+        return {"restored_count": restored_count}
+
+    return _mutate_store(restore)
 
 
 def get_compact_candidates(
@@ -626,9 +923,8 @@ def compact_memories(
         memory_type: Tipe memory yang di-compact
         dry_run: Jika True, hanya preview tanpa eksekusi
     """
-    candidates = get_compact_candidates(only_consolidated, memory_type)
-
     if dry_run:
+        candidates = get_compact_candidates(only_consolidated, memory_type)
         return {
             "status": "dry_run",
             "candidates_count": len(candidates),
@@ -643,19 +939,29 @@ def compact_memories(
             ],
         }
 
-    # Execute compact
-    archived_ids = []
-    for memory in candidates:
-        result = archive_memory(memory["id"], reason="quotient_forgetting")
-        if result:
+    def compact(store: Dict[str, Any]) -> Dict[str, Any]:
+        archived_ids: List[str] = []
+        now = _now_iso()
+        for memory in store["memories"]:
+            if _get_status(memory) != MEMORY_STATUS_ACTIVE:
+                continue
+            if memory.get("type") != memory_type:
+                continue
+            if only_consolidated and memory.get("consolidated_into") is None:
+                continue
+            memory["status"] = MEMORY_STATUS_ARCHIVED
+            memory["archived_at"] = now
+            memory["archive_reason"] = "quotient_forgetting"
             archived_ids.append(memory["id"])
+        return {
+            "status": "compacted",
+            "archived_count": len(archived_ids),
+            "archived_ids": archived_ids,
+            "memory_type": memory_type,
+            "transactional": True,
+        }
 
-    return {
-        "status": "compacted",
-        "archived_count": len(archived_ids),
-        "archived_ids": archived_ids,
-        "memory_type": memory_type,
-    }
+    return _mutate_store(compact)
 
 
 def get_archive_stats() -> Dict[str, Any]:
@@ -680,10 +986,6 @@ def get_archive_stats() -> Dict[str, Any]:
         "archived_count": archived_count,
         "archived_by_type": archived_by_type,
     }
-
-
-# Edge types yang dihitung sebagai β₁_reasoning (dari memory_analyzers)
-REASONING_EDGE_TYPES = {"inferential", "causal"}
 
 
 def _build_reasoning_adjacency(store: Dict[str, Any]) -> Dict[str, List[str]]:
@@ -741,20 +1043,20 @@ def bridge_memories(
     Buat asosiasi tingkat tinggi antara dua memories (biasanya semantic).
     Ini adalah "lem level-2" yang menghubungkan pulau-pulau pengetahuan.
     """
-    store = load_store()
-    memory_ids = {m["id"] for m in store.get("memories", [])}
+    if assoc_type not in ASSOCIATION_TYPES:
+        return {"status": "error", "error": f"Invalid association type: {assoc_type}"}
 
-    # Validasi memory ada
-    if from_id not in memory_ids:
-        return {"status": "error", "error": f"Memory not found: {from_id}"}
-    if to_id not in memory_ids:
-        return {"status": "error", "error": f"Memory not found: {to_id}"}
-    if from_id == to_id:
-        return {"status": "error", "error": "Cannot bridge memory to itself"}
-
-    # Safety check untuk reasoning edges
-    if safe_mode and assoc_type in REASONING_EDGE_TYPES:
-        if would_create_reasoning_cycle(from_id, to_id, store):
+    def bridge(store: Dict[str, Any]) -> Dict[str, Any]:
+        memory_ids = {m["id"] for m in store.get("memories", [])}
+        if from_id not in memory_ids:
+            return {"status": "error", "error": f"Memory not found: {from_id}"}
+        if to_id not in memory_ids:
+            return {"status": "error", "error": f"Memory not found: {to_id}"}
+        if from_id == to_id:
+            return {"status": "error", "error": "Cannot bridge memory to itself"}
+        if safe_mode and assoc_type in REASONING_EDGE_TYPES and would_create_reasoning_cycle(
+            from_id, to_id, store
+        ):
             return {
                 "status": "rejected",
                 "reason": "would_create_reasoning_cycle",
@@ -763,28 +1065,32 @@ def bridge_memories(
                 "assoc_type": assoc_type,
                 "message": (
                     f"Bridge {from_id} --{assoc_type}--> {to_id} would create "
-                    f"a reasoning cycle (β₁_reasoning would increase). "
-                    f"Use assoc_type='semantic' or reverse the direction."
+                    f"a directed reasoning cycle. Use assoc_type='semantic' or "
+                    f"reverse the direction. β₁_reasoning is reported separately "
+                    f"as an undirected multigraph cycle rank."
                 ),
             }
+        association = {
+            "id": f"assoc_{uuid.uuid4().hex[:8]}",
+            "from": from_id,
+            "to": to_id,
+            "type": assoc_type,
+            "strength": max(0.0, min(1.0, strength)),
+            "created_at": _now_iso(),
+            "metadata": metadata or {"reason": "semantic_bridging"},
+        }
+        store["associations"].append(association)
+        return {
+            "status": "bridged",
+            "association": copy.deepcopy(association),
+            "from_id": from_id,
+            "to_id": to_id,
+            "assoc_type": assoc_type,
+            "safe_mode": safe_mode,
+            "transactional": True,
+        }
 
-    # Buat bridge
-    assoc = store_association(
-        from_id=from_id,
-        to_id=to_id,
-        assoc_type=assoc_type,
-        strength=strength,
-        metadata=metadata or {"reason": "semantic_bridging"},
-    )
-
-    return {
-        "status": "bridged",
-        "association": assoc,
-        "from_id": from_id,
-        "to_id": to_id,
-        "assoc_type": assoc_type,
-        "safe_mode": safe_mode,
-    }
+    return _mutate_store(bridge)
 
 
 def get_bridge_candidates(

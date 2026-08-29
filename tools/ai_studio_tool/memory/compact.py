@@ -1,6 +1,6 @@
 """
 Memory Compact & Quotient Forgetting — HoTT Memory Domain
-Schema Version: 4.0.0-memory
+Schema Version: 4.1.0-memory
 """
 
 from memory.store import (

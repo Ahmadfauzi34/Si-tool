@@ -1,6 +1,6 @@
 """
 Memory Fibration — HoTT Kernel Phase C
-Schema Version: 4.0.0-memory
+Schema Version: 4.1.0-memory
 
 Implementasi Fibration-aware Context Management (hott3.txt):
 - Fiber state management (context window sebagai fiber)
@@ -12,33 +12,28 @@ Implementasi Fibration-aware Context Management (hott3.txt):
 """
 
 import os
-import json
 import uuid
 import datetime
 import math
 from typing import Any, Dict, List, Optional
 
-SCHEMA_VERSION = "4.0.0-memory"
+from memory.runtime import (
+    MemoryStateError,
+    get_memory_runtime_paths,
+    memory_runtime_lock,
+    read_json_unlocked,
+    write_json_unlocked,
+)
 
-_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-_TOOL_ROOT = os.path.dirname(_SCRIPT_DIR) if os.path.basename(_SCRIPT_DIR) in ("context", "memory") else _SCRIPT_DIR
+SCHEMA_VERSION = "4.1.0-memory"
 
-DATA_FIBER_DIR = os.path.join(_TOOL_ROOT, "data", "fiber")
-DATA_FIBER_STATE_PATH = os.path.join(DATA_FIBER_DIR, "fiber_state.json")
-DATA_FIBER_ARCHIVE_DIR = os.path.join(DATA_FIBER_DIR, "fiber_archive")
-
-MEMORY_DIR = DATA_FIBER_DIR if os.path.exists(DATA_FIBER_DIR) else os.path.join(_TOOL_ROOT, "memory")
-FIBER_STATE_PATH = DATA_FIBER_STATE_PATH if os.path.exists(DATA_FIBER_STATE_PATH) else os.path.join(MEMORY_DIR, "fiber_state.json")
-FIBER_ARCHIVE_DIR = DATA_FIBER_ARCHIVE_DIR if os.path.exists(DATA_FIBER_ARCHIVE_DIR) else os.path.join(MEMORY_DIR, "fiber_archive")
+_INITIAL_PATHS = get_memory_runtime_paths(create=False)
+FIBER_STATE_PATH = _INITIAL_PATHS["fiber_state_path"]
+FIBER_ARCHIVE_DIR = _INITIAL_PATHS["fiber_archive_dir"]
 
 
 def _now_iso() -> str:
-    return datetime.datetime.utcnow().isoformat() + "Z"
-
-
-def _ensure_dirs():
-    os.makedirs(MEMORY_DIR, exist_ok=True)
-    os.makedirs(FIBER_ARCHIVE_DIR, exist_ok=True)
+    return datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 # ============================================================
@@ -70,22 +65,21 @@ def _default_fiber_state() -> Dict[str, Any]:
 
 def load_fiber_state() -> Dict[str, Any]:
     """Load fiber state dari file."""
-    _ensure_dirs()
-    if not os.path.isfile(FIBER_STATE_PATH):
-        return _default_fiber_state()
-    try:
-        with open(FIBER_STATE_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return _default_fiber_state()
+    def validate(value: Any) -> None:
+        if not isinstance(value, dict):
+            raise ValueError("fiber state must be an object")
+        if not isinstance(value.get("active_memories", []), list):
+            raise ValueError("fiber active_memories must be a list")
+
+    with memory_runtime_lock() as paths:
+        return read_json_unlocked(paths["fiber_state_path"], _default_fiber_state, validate)
 
 
 def save_fiber_state(state: Dict[str, Any]) -> None:
     """Simpan fiber state ke file."""
-    _ensure_dirs()
     state["last_updated"] = _now_iso()
-    with open(FIBER_STATE_PATH, "w", encoding="utf-8") as f:
-        json.dump(state, f, indent=2, ensure_ascii=False)
+    with memory_runtime_lock() as paths:
+        write_json_unlocked(paths["fiber_state_path"], state)
 
 
 def init_fiber(task: str, focus: str) -> Dict[str, Any]:
@@ -122,12 +116,11 @@ def init_fiber(task: str, focus: str) -> Dict[str, Any]:
 
 def _archive_fiber(state: Dict[str, Any]) -> None:
     """Arsipkan fiber lama ke fiber_archive/."""
-    _ensure_dirs()
     fiber_id = state.get("fiber_id", "unknown")
-    archive_path = os.path.join(FIBER_ARCHIVE_DIR, f"{fiber_id}.json")
     state["archived_at"] = _now_iso()
-    with open(archive_path, "w", encoding="utf-8") as f:
-        json.dump(state, f, indent=2, ensure_ascii=False)
+    with memory_runtime_lock() as paths:
+        archive_path = os.path.join(paths["fiber_archive_dir"], f"{fiber_id}.json")
+        write_json_unlocked(archive_path, state)
 
 
 # ============================================================
@@ -470,11 +463,13 @@ def compute_decay_factor(
     try:
         last_accessed = datetime.datetime.fromisoformat(
             last_accessed_str.replace("Z", "+00:00")
-        ).replace(tzinfo=None)
+        )
+        if last_accessed.tzinfo is None:
+            last_accessed = last_accessed.replace(tzinfo=datetime.timezone.utc)
     except (ValueError, AttributeError):
         return 0.5
     
-    days_since = (datetime.datetime.utcnow() - last_accessed).days
+    days_since = (datetime.datetime.now(datetime.timezone.utc) - last_accessed).days
     
     # Exponential decay: factor = 0.5^(days/half_life)
     decay = math.pow(0.5, max(0, days_since) / half_life_days)
@@ -567,29 +562,30 @@ def transport_from_archive(
     Returns:
         Dict dengan transported memories dan metadata translasi
     """
-    _ensure_dirs()
-
-    # Load archived fiber
-    archive_path = os.path.join(FIBER_ARCHIVE_DIR, f"{source_fiber_id}.json")
-    if not os.path.isfile(archive_path):
-        # Coba cari di daftar archive
-        archived_files = [
-            f for f in os.listdir(FIBER_ARCHIVE_DIR)
-            if f.endswith(".json")
-        ]
-        matches = [f for f in archived_files if source_fiber_id in f]
-        if matches:
-            archive_path = os.path.join(FIBER_ARCHIVE_DIR, matches[0])
-        else:
-            return {
-                "status": "error",
-                "error": f"Archived fiber not found: {source_fiber_id}",
-                "available_archives": archived_files,
-            }
+    def validate_archive(value: Any) -> None:
+        if not isinstance(value, dict) or not value.get("fiber_id"):
+            raise ValueError("fiber archive must be an object with fiber_id")
 
     try:
-        with open(archive_path, "r", encoding="utf-8") as f:
-            archived_fiber = json.load(f)
+        with memory_runtime_lock() as paths:
+            archive_dir = paths["fiber_archive_dir"]
+            archive_path = os.path.join(archive_dir, f"{source_fiber_id}.json")
+            archived_files = sorted(
+                filename for filename in os.listdir(archive_dir)
+                if filename.endswith(".json") and ".corrupt." not in filename
+            )
+            if not os.path.isfile(archive_path):
+                matches = [filename for filename in archived_files if source_fiber_id in filename]
+                if not matches:
+                    return {
+                        "status": "error",
+                        "error": f"Archived fiber not found: {source_fiber_id}",
+                        "available_archives": archived_files,
+                    }
+                archive_path = os.path.join(archive_dir, matches[0])
+            archived_fiber = read_json_unlocked(archive_path, dict, validate_archive)
+    except MemoryStateError:
+        raise
     except Exception as exc:
         return {"status": "error", "error": f"Failed to read archive: {exc}"}
 
@@ -708,30 +704,29 @@ def transport_from_archive(
 
 def list_archived_fibers() -> Dict[str, Any]:
     """List semua archived fibers untuk referensi transport."""
-    _ensure_dirs()
     archives = []
-    
-    for filename in sorted(os.listdir(FIBER_ARCHIVE_DIR)):
-        if not filename.endswith(".json"):
-            continue
-        filepath = os.path.join(FIBER_ARCHIVE_DIR, filename)
-        try:
-            with open(filepath, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            archives.append({
-                "fiber_id": data.get("fiber_id"),
-                "filename": filename,
-                "task": data.get("base_state", {}).get("task"),
-                "focus": data.get("base_state", {}).get("focus"),
-                "active_memories_count": len(data.get("active_memories", [])),
-                "archived_at": data.get("archived_at"),
-                "dialog_turns": data.get("base_state", {}).get("dialog_turn", 0),
-            })
-        except Exception:
-            continue
+
+    with memory_runtime_lock() as paths:
+        archive_dir = paths["fiber_archive_dir"]
+        for filename in sorted(os.listdir(archive_dir)):
+            if not filename.endswith(".json") or ".corrupt." in filename:
+                continue
+            filepath = os.path.join(archive_dir, filename)
+            try:
+                data = read_json_unlocked(filepath, dict)
+                archives.append({
+                    "fiber_id": data.get("fiber_id"),
+                    "filename": filename,
+                    "task": data.get("base_state", {}).get("task"),
+                    "focus": data.get("base_state", {}).get("focus"),
+                    "active_memories_count": len(data.get("active_memories", [])),
+                    "archived_at": data.get("archived_at"),
+                    "dialog_turns": data.get("base_state", {}).get("dialog_turn", 0),
+                })
+            except MemoryStateError:
+                raise
     
     return {
         "archived_fibers": archives,
         "count": len(archives),
     }
-

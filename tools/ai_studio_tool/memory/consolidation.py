@@ -1,6 +1,6 @@
 """
 Memory Consolidation — HoTT Memory Colimit
-Schema Version: 4.0.0-memory
+Schema Version: 4.1.0-memory
 """
 
 from memory.store import (

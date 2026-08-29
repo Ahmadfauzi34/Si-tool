@@ -1,14 +1,15 @@
 """
 Cross-Domain Analysis & Auto-Store — HoTT Kernel Bridge Domain
-Schema Version: 4.0.0-memory
+Schema Version: 4.1.0-memory
 """
 
 import os
 import json
+import hashlib
 import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-SCHEMA_VERSION = "4.0.0-memory"
+SCHEMA_VERSION = "4.1.0-memory"
 
 CONSOLIDATION_EPISODIC_THRESHOLD = 15
 CONSOLIDATION_BETA0_THRESHOLD = 5
@@ -63,20 +64,25 @@ def filter_findings_for_memory(
 def auto_store_findings(
     storeable_findings: List[Dict[str, Any]],
     scan_root: str = "src",
+    evidence_signature: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Simpan filtered findings sebagai episodic memories."""
+    """Atomically upsert analyzer observations by deterministic identity."""
     try:
-        from memory.store import store_memory, store_association, load_store
+        from memory.store import upsert_memory_observations
+        from memory.runtime import memory_runtime_provenance
     except ImportError:
         try:
-            from memory_store import store_memory, store_association, load_store
+            from memory_store import upsert_memory_observations
+            from memory_runtime import memory_runtime_provenance
         except ImportError:
             return {"error": "memory_store not available", "stored_count": 0}
 
-    stored_ids: List[str] = []
-    timestamp = datetime.datetime.utcnow().isoformat() + "Z"
+    timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+    runtime = memory_runtime_provenance()
+    scope_id = runtime["scope_id"]
+    observations: List[Dict[str, Any]] = []
 
-    for i, finding in enumerate(storeable_findings):
+    for finding in storeable_findings:
         content = (
             f"[{finding['category']}] "
             f"{finding['finding_type']} di {finding['file'] or scan_root}: "
@@ -100,35 +106,38 @@ def auto_store_findings(
             "severity": finding["severity"],
             "file": finding["file"],
             "batch_timestamp": timestamp,
+            "evidence_signature": evidence_signature,
+            "memory_scope_id": scope_id,
         }
+        identity_payload = {
+            "scope_id": scope_id,
+            "category": finding["category"],
+            "source_analyzer": finding["source_analyzer"],
+            "finding_type": finding["finding_type"],
+            "severity": finding["severity"],
+            "file": str(finding["file"]).replace("\\", "/"),
+            "content": " ".join(str(finding["content"]).split()),
+        }
+        identity_json = json.dumps(identity_payload, sort_keys=True, separators=(",", ":"))
+        dedup_key = f"finding:{hashlib.sha256(identity_json.encode('utf-8')).hexdigest()}"
+        observations.append({
+            "dedup_key": dedup_key,
+            "memory_type": "episodic",
+            "content": content,
+            "source": f"hott_kernel xanalyze {scan_root}",
+            "importance": 0.9 if finding["severity"] == "high" else 0.7,
+            "tags": tags,
+            "context": context,
+        })
 
-        memory = store_memory(
-            memory_type="episodic",
-            content=content,
-            source=f"hott_kernel xanalyze {scan_root}",
-            importance=0.9 if finding["severity"] == "high" else 0.7,
-            tags=tags,
-            context=context,
-        )
-        stored_ids.append(memory["id"])
-
-        if i > 0 and stored_ids:
-            try:
-                store_association(
-                    from_id=stored_ids[i - 1],
-                    to_id=memory["id"],
-                    assoc_type="temporal",
-                    strength=0.6,
-                )
-            except Exception:
-                pass
-
-    return {
-        "status": "auto_stored",
-        "stored_count": len(stored_ids),
-        "stored_ids": stored_ids,
+    result = upsert_memory_observations(observations)
+    result.update({
+        "status": "auto_observed",
         "batch_timestamp": timestamp,
-    }
+        "evidence_signature": evidence_signature,
+        "memory_scope": runtime,
+    })
+    return result
 
 
 def check_consolidation_trigger() -> Dict[str, Any]:
