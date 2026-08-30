@@ -20,6 +20,14 @@ from memory.runtime import (
     read_json_unlocked,
     write_json_unlocked,
 )
+from memory.provenance import (
+    DEFAULT_PROVENANCE_EVENT_LIMIT,
+    apply_provenance_retention,
+    default_provenance_retention,
+    normalize_observation_event,
+    provenance_retention_snapshot,
+    validate_provenance_event_limit,
+)
 
 SCHEMA_VERSION = "4.1.0-memory"
 
@@ -148,6 +156,7 @@ def _default_store() -> Dict[str, Any]:
         "memories": [],
         "associations": [],
         "events": [],
+        "provenance_retention": default_provenance_retention(),
     }
 
 
@@ -182,6 +191,32 @@ def _validate_store(store: Any) -> None:
         raise ValueError("association ids must be unique")
     if "events" in store and not isinstance(store["events"], list):
         raise ValueError("memory store 'events' must be a list")
+    for event in store.get("events", []):
+        if not isinstance(event, dict) or not event.get("type"):
+            raise ValueError("every memory event must be an object with a type")
+        if "occurrence_count" in event and (
+            isinstance(event["occurrence_count"], bool)
+            or not isinstance(event["occurrence_count"], int)
+            or event["occurrence_count"] < 1
+        ):
+            raise ValueError("memory event occurrence_count must be a positive integer")
+    retention = store.get("provenance_retention")
+    if retention is not None:
+        if not isinstance(retention, dict):
+            raise ValueError("memory store 'provenance_retention' must be an object")
+        validate_provenance_event_limit(
+            retention.get("observation_event_limit", DEFAULT_PROVENANCE_EVENT_LIMIT)
+        )
+        for field in (
+            "coalesced_batch_occurrences",
+            "archived_event_records",
+            "archived_batch_occurrences",
+        ):
+            value = retention.get(field, 0)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(
+                    f"memory provenance retention '{field}' must be a non-negative integer"
+                )
 
 
 def _normalize_store(store: Dict[str, Any]) -> Dict[str, Any]:
@@ -219,6 +254,7 @@ def _normalize_store(store: Dict[str, Any]) -> Dict[str, Any]:
         "scope_kind": paths["scope_kind"],
         "scope_name": paths["scope_name"],
     }
+    apply_provenance_retention(store)
     store["schema_version"] = SCHEMA_VERSION
     return store
 
@@ -310,6 +346,7 @@ def upsert_memory_observations(
     current_graph_signature: Optional[str] = None,
     active_files: Optional[List[str]] = None,
     create_batch_links: bool = False,
+    provenance_event_limit: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Atomically reconcile one analyzer-evidence snapshot.
 
@@ -322,6 +359,8 @@ def upsert_memory_observations(
     """
     if link_type not in ASSOCIATION_TYPES:
         raise ValueError(f"Invalid association type: {link_type}")
+    if provenance_event_limit is not None:
+        validate_provenance_event_limit(provenance_event_limit)
     for observation in observations:
         if not observation.get("dedup_key"):
             raise ValueError("Every observation requires a dedup_key")
@@ -561,7 +600,19 @@ def upsert_memory_observations(
             "stale_ids": list(stale_ids),
             "provenance_not_semantic_edge": not create_batch_links,
         }
-        store.setdefault("events", []).append(event)
+        previous_event = store.get("events", [])[-1] if store.get("events") else None
+        normalized_event = normalize_observation_event(event)
+        event_will_coalesce = (
+            isinstance(previous_event, dict)
+            and previous_event.get("type") == "observation_batch"
+            and normalize_observation_event(previous_event).get("event_signature")
+            == normalized_event.get("event_signature")
+        )
+        store.setdefault("events", []).append(normalized_event)
+        retention_transition = apply_provenance_retention(
+            store, provenance_event_limit
+        )
+        retention_snapshot = provenance_retention_snapshot(store)
 
         return {
             "status": "reconciled",
@@ -581,6 +632,15 @@ def upsert_memory_observations(
             "observed_ids": observed_ids,
             "associations_created": associations_created,
             "provenance_events_recorded": 1,
+            "provenance_event_records_added": 0 if event_will_coalesce else 1,
+            "provenance_event_coalesced": event_will_coalesce,
+            "provenance_event_records_compacted": retention_transition[
+                "compacted_event_records"
+            ],
+            "provenance_batch_occurrences_compacted": retention_transition[
+                "compacted_batch_occurrences"
+            ],
+            "provenance_retention": retention_snapshot,
             "batch_order_is_semantic_edge": create_batch_links,
             "input_observation_count": input_count,
             "unique_observation_count": len(unique_observations),
@@ -905,6 +965,7 @@ def get_memory_stats() -> Dict[str, Any]:
         "by_evidence_status": by_evidence_status,
         "provenance_associations": provenance_association_count,
         "semantic_associations": len(associations) - provenance_association_count,
+        "provenance_retention": provenance_retention_snapshot(store),
         "schema_version": store.get("schema_version", "unknown"),
         "updated_at": store.get("updated_at", "unknown"),
         "runtime": memory_runtime_provenance(),
