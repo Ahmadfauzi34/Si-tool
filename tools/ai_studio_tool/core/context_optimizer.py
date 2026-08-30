@@ -35,6 +35,8 @@ MAX_SEMANTIC_SEEDS = 8
 MAX_EXCERPT_LINES = 12
 MAX_MEMORY_CONTEXT_CHARS = 1200
 MAX_MEMORY_CONTENT_CHARS = 480
+MIN_SOURCE_CARD_CHARS = 420
+MAX_MEMORY_BUDGET_FRACTION = 0.35
 
 _TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9]*")
 _CAMEL_RE = re.compile(r"([a-z0-9])([A-Z])")
@@ -318,9 +320,35 @@ def _compact_list(values: List[str], limit: int = 3) -> str:
 def _render_card(profile: Dict[str, Any], detail: str, char_cap: int) -> str:
     distance = profile.get("graph_distance")
     distance_text = "-" if distance is None else str(distance)
+    path = str(profile["file"])
+    if len(path) > 180:
+        path = f"...{path[-177:]}"
     lines = [
-        f"FILE {profile['file']} | score={profile['score']:.4f} | d={distance_text}",
-        f"why={_compact_list(profile['selection_signals'], 5)}",
+        f"FILE {path} | score={profile['score']:.4f} | d={distance_text}",
+    ]
+
+    def joined(candidate: List[str]) -> str:
+        return "\n".join(candidate) + "\n"
+
+    excerpt_lines = profile.get("source_excerpt", {}).get("lines", [])
+    if detail == "source" and excerpt_lines:
+        source_prefix = f"  L{excerpt_lines[0]['line']}: "
+        source_text = str(excerpt_lines[0]["text"])
+        source_base = joined(lines + ["source_excerpt:", source_prefix])
+        available_source_chars = max(0, char_cap - len(source_base))
+        first_source = source_prefix + source_text[:available_source_chars]
+        if available_source_chars and len(
+            joined(lines + ["source_excerpt:", first_source])
+        ) <= char_cap:
+            lines.extend(["source_excerpt:", first_source])
+            for item in excerpt_lines[1:]:
+                rendered_line = f"  L{item['line']}: {item['text']}"
+                if len(joined(lines + [rendered_line])) > char_cap:
+                    break
+                lines.append(rendered_line)
+
+    optional_lines = [
+        f"why={_compact_list(profile['selection_signals'], 3)}",
         (
             f"topology=boundary:{profile['topology']['boundary']}; "
             f"type:{profile['topology']['node_type']}; "
@@ -334,29 +362,16 @@ def _render_card(profile: Dict[str, Any], detail: str, char_cap: int) -> str:
         for item in profile.get("outline", {}).get("declarations", [])
     ]
     if symbols:
-        lines.append(f"symbols={_compact_list(symbols, 5)}")
+        optional_lines.append(f"symbols={_compact_list(symbols, 5)}")
     findings = [
         f"{item['analyzer']}:{item['type']}:{item['severity']}"
         for item in profile.get("findings", [])
     ]
     if findings:
-        lines.append(f"evidence={_compact_list(findings, 4)}")
-
-    def joined(candidate: List[str]) -> str:
-        return "\n".join(candidate) + "\n"
-
-    while len(joined(lines)) > char_cap and len(lines) > 2:
-        lines.pop()
-    if detail == "source":
-        excerpt_lines = profile.get("source_excerpt", {}).get("lines", [])
-        if excerpt_lines:
-            if len(joined(lines + ["source_excerpt:"])) <= char_cap:
-                lines.append("source_excerpt:")
-            for item in excerpt_lines:
-                rendered = f"  L{item['line']}: {item['text']}"
-                if len(joined(lines + [rendered])) > char_cap:
-                    break
-                lines.append(rendered)
+        optional_lines.append(f"evidence={_compact_list(findings, 4)}")
+    for optional in optional_lines:
+        if len(joined(lines + [optional])) <= char_cap:
+            lines.append(optional)
     rendered = joined(lines)
     if len(rendered) > char_cap:
         rendered = rendered[: max(0, char_cap - 1)].rstrip() + "\n"
@@ -379,22 +394,20 @@ def _render_memory_block(
             f"scope={scope.get('scope_id', 'unknown')}; "
             f"retrieval={retrieval.get('model', 'unknown')}"
         ),
-        f"claim_boundary={retrieval.get('claim_boundary', 'historical observation only')}",
-        "trust=observational context; verify against current source before acting.",
+        "trust=historical observation; freshness-gated when grounded; verify current source.",
     ]
     included: List[Dict[str, Any]] = []
 
     for memory in memory_context.get("memories", []):
         raw_content = " ".join(str(memory.get("content", "")).split())
         source = " ".join(str(memory.get("source", "unknown")).split())[:160]
-        tags = ",".join(str(tag)[:40] for tag in memory.get("tags", [])[:6]) or "-"
         record_prefix = (
             f"MEMORY {memory.get('id', 'unknown')} | type={memory.get('type', 'unknown')} | "
-            f"importance={float(memory.get('importance', 0.0)):.2f} | "
             f"observations={int(memory.get('observation_count', 1))} | "
-            f"retrieval_score={memory.get('retrieval_match', {}).get('score', '-')}\n"
-            f"source={source}; file={memory.get('file') or '-'}; tags={tags}; "
-            f"content_hash={memory.get('content_sha256', 'unknown')}\n"
+            f"status={memory.get('evidence_status', 'unverified')}; "
+            f"freshness={memory.get('freshness', 'unverified')}\n"
+            f"source={source}; file={memory.get('file') or '-'}; "
+            f"hash={memory.get('content_sha256', 'unknown')}\n"
             "content="
         )
         base_candidate = "\n".join(lines + [record_prefix]) + "\n"
@@ -619,35 +632,57 @@ def build_context_pack(
         "scope=static TS/JS graph plus project-scoped historical observations; "
         "excerpts may be partial; findings and memories are observations.\n"
     )
-    footer_reserve = 110
+    footer_reserve = 120
+    available_content_chars = max(
+        0, char_budget - len(header) - footer_reserve
+    )
+    source_floor_chars = min(MIN_SOURCE_CARD_CHARS, available_content_chars)
     memory_cap = min(
         MAX_MEMORY_CONTEXT_CHARS,
-        max(640, char_budget // 2),
-        max(0, char_budget - len(header) - footer_reserve - 260),
+        int(char_budget * MAX_MEMORY_BUDGET_FRACTION),
+        max(0, available_content_chars - source_floor_chars),
     )
     memory_block, included_memories = _render_memory_block(memory_context, memory_cap)
     parts = [header]
-    if memory_block:
-        parts.append(memory_block)
     selected: List[Dict[str, Any]] = []
+    rendered_cards: List[str] = []
     allocation_divisor = max(1, min(len(profiles), 4))
     card_budget = max(
-        260,
-        char_budget - len(header) - len(memory_block) - footer_reserve,
+        0,
+        available_content_chars - len(memory_block),
     )
-    per_card_cap = max(260, min(1200, card_budget // allocation_divisor))
+    per_card_cap = max(
+        MIN_SOURCE_CARD_CHARS,
+        min(1200, card_budget // allocation_divisor if card_budget else 0),
+    )
     for profile in profiles:
         card = _render_card(profile, detail, per_card_cap)
-        current_length = len("\n".join(parts))
-        if current_length + len(card) + footer_reserve <= char_budget:
-            parts.append(card)
+        cards_length = sum(len(item) for item in rendered_cards)
+        if cards_length + len(card) <= card_budget:
+            rendered_cards.append(card)
             selected.append(profile)
             continue
         if profile["mandatory"]:
-            compact = _render_card(profile, "outline", 260)
-            if current_length + len(compact) + footer_reserve <= char_budget:
-                parts.append(compact)
+            compact = _render_card(profile, detail, MIN_SOURCE_CARD_CHARS)
+            if cards_length + len(compact) <= card_budget:
+                rendered_cards.append(compact)
                 selected.append(profile)
+
+    # Current source is the grounding floor. If memory prevented every source
+    # card from fitting, omit memory and retry the highest-ranked source.
+    if not selected and profiles:
+        memory_block = ""
+        included_memories = []
+        card_budget = available_content_chars
+        fallback_cap = min(1200, max(MIN_SOURCE_CARD_CHARS, card_budget))
+        fallback = _render_card(profiles[0], detail, fallback_cap)
+        if len(fallback) <= card_budget:
+            rendered_cards.append(fallback)
+            selected.append(profiles[0])
+
+    parts.extend(rendered_cards)
+    if memory_block:
+        parts.append(memory_block)
 
     selected_paths = [item["file"] for item in selected]
     footer = (
@@ -660,6 +695,17 @@ def build_context_pack(
     if len(context_block) > char_budget:
         context_block = context_block[:char_budget].rstrip()
     used_chars = len(context_block)
+    source_excerpt_line_count = sum(
+        1
+        for card in rendered_cards
+        for line in card.splitlines()
+        if line.startswith("  L")
+    )
+    source_grounding_satisfied = (
+        detail != "source"
+        or not selected
+        or source_excerpt_line_count > 0
+    )
     estimated_tokens = math.ceil(used_chars / CHARS_PER_TOKEN_ESTIMATE)
     max_lexical = max((item["score"] for item in lexical_data.values()), default=0.0)
     if resolved_targets:
@@ -713,6 +759,16 @@ def build_context_pack(
             "utilization": round(used_chars / char_budget, 4) if char_budget else 0.0,
             "within_budget": used_chars <= char_budget,
             "token_count_is_estimate": True,
+            "allocation": {
+                "source_floor_chars": source_floor_chars,
+                "source_card_chars": sum(len(item) for item in rendered_cards),
+                "source_excerpt_line_count": source_excerpt_line_count,
+                "source_grounding_satisfied": source_grounding_satisfied,
+                "memory_cap_chars": memory_cap,
+                "memory_chars": len(memory_block),
+                "memory_max_fraction": MAX_MEMORY_BUDGET_FRACTION,
+                "current_source_precedes_memory": bool(memory_block),
+            },
         },
         "provenance": {
             "graph_content_signature": signature,

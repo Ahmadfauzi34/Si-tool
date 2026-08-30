@@ -245,7 +245,7 @@ STEP 6: Switch Context (Jika Pindah Task)
 | `drift_interpretation` | `"medium"/"high"` | Jalankan `establish` dulu |
 | `reasoning_strategy` | `component_localized_traversal` | Perubahan terisolasi per komponen |
 | `reasoning_strategy` | `conservative_edit` | Setiap perubahan berdampak luas |
-| `reasoning_strategy` | `bridge_building` | Hubungkan komponen sebelum cross-domain |
+| `reasoning_strategy` | `bridge_building` | Cari relation witness; jangan hubungkan hanya untuk menurunkan β₀ |
 | `reasoning_budget` | `"low"` | Analisis minimal cukup |
 | `reasoning_budget` | `"high"` | Analisis mendalam diperlukan |
 | `regrounding_needed` | `true` | Re-scan codebase, pemahaman outdated |
@@ -255,7 +255,7 @@ STEP 6: Switch Context (Jika Pindah Task)
 
 | Field | Interpretasi | Action |
 |---|---|---|
-| `beta_0` tinggi | Knowledge fragmentation | Bridge semantic memories (3.5) |
+| `beta_0` tinggi | Banyak semantic component | Reason per komponen; bridge hanya dengan relation witness |
 | `beta_1_reasoning` > 0 | Undirected reasoning cycle rank | Audit diamond, parallel edge, atau loop; jangan langsung sebut circular reasoning |
 | `directed_reasoning_cycle_witness_count` > 0 | Ada path reasoning berarah yang kembali | INVESTIGASI witness path |
 | `directed_reasoning_cycle_witnesses` | Saksi node dan edge type | Gunakan sebagai provenance keputusan |
@@ -299,7 +299,10 @@ diabaikan untuk β₀/β₁, sehingga β₁ **bukan** jumlah circular import.
 | `optimizer_additional_filesystem_scans=0` | Analyzer dan optimizer memakai snapshot sama | Hindari scan/read source berulang yang tidak diperlukan |
 | `memory_context.selected_count` | Memory evidence yang benar-benar masuk budget | Perlakukan sebagai observasi dan verifikasi ke source |
 | `memory_scope.scope_id` | Identitas project scope runtime | Pastikan tidak berubah/tercampur antar proyek |
-| `memory_retrieval.claim_boundary` | Retrieval lexical/path, bukan embedding proof | Jangan klaim semantic match yang tidak dihitung |
+| `memory_retrieval.claim_boundary` | Retrieval lexical/path + snapshot freshness gate, bukan embedding proof | Jangan klaim semantic match yang tidak dihitung |
+| `budget.allocation.source_grounding_satisfied` | Current source excerpt masuk pada mode source | Harus `true` sebelum memakai memory evidence |
+| `budget.allocation.memory_max_fraction` | Cap memory terhadap hard budget | Nilai default `0.35`; source harus didahulukan |
+| `budget.allocation.current_source_precedes_memory` | Urutan prompt saat memory disertakan | Pastikan source card muncul lebih dahulu |
 
 ### 4.2D Reading `graph_cache`
 
@@ -328,14 +331,23 @@ diabaikan untuk β₀/β₁, sehingga β₁ **bukan** jumlah circular import.
 
 ### 4.3 Reading `memory analyze` Output
 
+Default output memakai filtration `semantic_associations`: batch-order provenance
+dan analyzer evidence historis tidak ikut membentuk Betti/archetype. Audit
+lifecycle seluruh store melalui `store_by_evidence_status`; jumlah
+`by_evidence_status` hanya untuk vertex yang benar-benar masuk semantic graph.
+
 | Field | Threshold | Interpretasi |
 |---|---|---|
-| `memory_health_score` | > 0.7 | Memori sehat |
-| `memory_health_score` | 0.4 - 0.7 | Moderate, hati-hati |
-| `memory_health_score` | < 0.4 | Bermasalah, prioritaskan perbaikan |
-| `memory_archetype` | `memory_tree` | Terintegrasi, navigasi mudah |
-| `memory_archetype` | `memory_modular` | Terfragmentasi, perlu bridge |
+| `betti_numbers.beta_0/beta_1/beta_2` | exact integer | Koordinat default semantic filtration; β₂=0 untuk model 1-complex |
+| `memory_health_score` | > 0.7 | Structural finding pressure rendah; bukan correctness score |
+| `memory_health_score` | 0.4 - 0.7 | Structural finding pressure sedang |
+| `memory_health_score` | < 0.4 | Structural finding pressure tinggi; audit witness sebelum bertindak |
+| `memory_health_model.not_correctness_or_truth_score` | `true` | Jangan menilai kualitas/kebenaran memory dari scalar ini |
+| `memory_archetype` | `memory_tree` | Terintegrasi hanya pada semantic filtration, bukan karena urutan batch |
+| `memory_archetype` | `memory_modular` | Eksplorasi per komponen; bridge hanya jika relasi terbukti |
 | `memory_archetype` | `memory_fragmented_cyclic` | Fragmentasi + cycles, waspada |
+| `memory_stats.historical_memories_excluded` | > 0 | Ada evidence historis yang disimpan untuk audit tetapi tidak memengaruhi topology kini |
+| `memory_stats.provenance_associations_excluded` | > 0 | Ada provenance edge yang sengaja bukan semantic relation |
 
 ### 4.4 Reading `fiber status` Output
 
@@ -358,7 +370,13 @@ diabaikan untuk β₀/β₁, sehingga β₁ **bukan** jumlah circular import.
 |---|---|
 | `memory_store_result.stored_count` | Jumlah findings yang disimpan ke memory |
 | `memory_store_result.reused_count` | Findings identik yang memperbarui node lama |
+| `memory_store_result.revised_count` | Logical finding sama dengan evidence/severity/hash baru |
+| `memory_store_result.resolved_count` | Finding lama tidak ada pada analyzer snapshot lengkap kini |
+| `memory_store_result.orphaned_count` | Source evidence tidak ada pada snapshot file kini |
+| `memory_store_result.stale_count` | Analyzer gagal sehingga evidence lama belum tervalidasi pada snapshot kini |
 | `memory_store_result.duplicate_input_count` | Evidence duplikat dalam batch yang dikuotienkan |
+| `memory_store_result.batch_order_is_semantic_edge=false` | Urutan batch disimpan sebagai provenance event, bukan association semantic |
+| `memory_store_result.graph_content_signature` | Snapshot penuh yang menjadi dasar evidence |
 | `consolidation_signal.consolidation_candidate` | Apakah perlu konsolidasi |
 | `analysis_summary.health_score` | Kesehatan codebase |
 | `analysis_summary.archetype` | Bentuk topologis codebase |
@@ -456,6 +474,7 @@ hott_kernel.py memory unconsolidated_tags
 ### Memory Topology
 ```bash
 hott_kernel.py memory analyze --output summary
+hott_kernel.py memory analyze --include-historical --include-provenance --output summary  # audit only
 hott_kernel.py memory steer --output summary
 hott_kernel.py memory establish
 hott_kernel.py memory drift
@@ -514,7 +533,7 @@ python3 tools/ai_studio_tool/fixture_check.py
 | `memory_sparse_cyclic` | cycle_aware_recall | Association cycle rank; cek witness sebelum menyebut loop |
 | `memory_mixed_cyclic` | path_enumeration | Petakan association path dan arah edge |
 | `memory_dense_mesh` | conservative_recall | Sangat terhubung, filtering ketat |
-| `memory_fragmented_sparse_cyclic` | bridge_building | Hubungkan klaster sebelum cross-domain |
+| `memory_fragmented_sparse_cyclic` | component_localized_recall | Reason per komponen; hubungkan hanya dengan witness |
 | `memory_fragmented_cyclic` | component_mapping | Petakan komponen, validasi cross-component |
 
 ---

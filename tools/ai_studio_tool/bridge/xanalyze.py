@@ -7,13 +7,50 @@ import os
 import json
 import hashlib
 import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 SCHEMA_VERSION = "4.1.0-memory"
 
 CONSOLIDATION_EPISODIC_THRESHOLD = 15
 CONSOLIDATION_BETA0_THRESHOLD = 5
 CRITICAL_IMPACT_FAN_IN_THRESHOLD = 3
+
+
+def _stable_finding_subject(finding: Dict[str, Any]) -> str:
+    """Build logical identity from structured evidence, not prose/severity."""
+    file_path = str(finding.get("file", "")).replace("\\", "/")
+    if file_path:
+        return f"file:{file_path}"
+    structured: Dict[str, Any] = {}
+    for key in (
+        "files", "path", "cycle", "source", "target", "entrypoint",
+        "boundary", "type_name", "name",
+    ):
+        value = finding.get(key)
+        if value not in (None, "", []):
+            structured[key] = sorted(value) if isinstance(value, list) else value
+    if structured:
+        encoded = json.dumps(structured, sort_keys=True, separators=(",", ":"))
+        return f"structured:{hashlib.sha256(encoded.encode('utf-8')).hexdigest()}"
+    normalized = " ".join(str(finding.get("observation", "")).split())
+    return f"fallback:{hashlib.sha256(normalized.encode('utf-8')).hexdigest()}"
+
+
+def _storeable_finding(
+    analyzer: str,
+    finding: Dict[str, Any],
+    category: str,
+) -> Dict[str, Any]:
+    return {
+        "source_analyzer": analyzer,
+        "finding_type": finding.get("type", "unknown"),
+        "severity": finding.get("severity", "info"),
+        "file": finding.get("file", ""),
+        "related_files": sorted(str(item) for item in finding.get("files", [])),
+        "content": finding.get("observation", ""),
+        "category": category,
+        "stable_subject": _stable_finding_subject(finding),
+    }
 
 
 def filter_findings_for_memory(
@@ -28,35 +65,20 @@ def filter_findings_for_memory(
             severity = finding.get("severity", "info")
 
             if severity == "high":
-                storeable.append({
-                    "source_analyzer": analyzer_name,
-                    "finding_type": finding.get("type", "unknown"),
-                    "severity": severity,
-                    "file": finding.get("file", ""),
-                    "content": finding.get("observation", ""),
-                    "category": "high_severity_finding",
-                })
+                storeable.append(_storeable_finding(
+                    analyzer_name, finding, "high_severity_finding"
+                ))
             elif severity == "medium":
                 ftype = finding.get("type", "")
                 if ftype in ("circular_dependency", "entrypoint_high_risk", "change_risk"):
-                    storeable.append({
-                        "source_analyzer": analyzer_name,
-                        "finding_type": ftype,
-                        "severity": severity,
-                        "file": finding.get("file", ""),
-                        "content": finding.get("observation", ""),
-                        "category": "critical_medium_finding",
-                    })
+                    storeable.append(_storeable_finding(
+                        analyzer_name, finding, "critical_medium_finding"
+                    ))
 
     for corr in correlations:
-        storeable.append({
-            "source_analyzer": "cross_analyzer",
-            "finding_type": corr.get("type", "unknown"),
-            "severity": corr.get("severity", "medium"),
-            "file": corr.get("file", ""),
-            "content": corr.get("observation", ""),
-            "category": "cross_analyzer_correlation",
-        })
+        storeable.append(_storeable_finding(
+            "cross_analyzer", corr, "cross_analyzer_correlation"
+        ))
 
     return storeable
 
@@ -65,8 +87,13 @@ def auto_store_findings(
     storeable_findings: List[Dict[str, Any]],
     scan_root: str = "src",
     evidence_signature: Optional[str] = None,
+    graph_content_signature: Optional[str] = None,
+    active_files: Optional[Iterable[str]] = None,
+    file_content_hashes: Optional[Dict[str, str]] = None,
+    analyzers_observed: Optional[Iterable[str]] = None,
+    analyzers_failed: Optional[Iterable[str]] = None,
 ) -> Dict[str, Any]:
-    """Atomically upsert analyzer observations by deterministic identity."""
+    """Atomically reconcile analyzer observations by logical identity."""
     try:
         from memory.store import upsert_memory_observations
         from memory.runtime import memory_runtime_provenance
@@ -80,6 +107,30 @@ def auto_store_findings(
     timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
     runtime = memory_runtime_provenance()
     scope_id = runtime["scope_id"]
+    project_root = str(runtime.get("project_root", os.getcwd()))
+    absolute_scan_root = os.path.abspath(scan_root)
+    try:
+        scan_scope = os.path.relpath(absolute_scan_root, project_root).replace("\\", "/")
+    except ValueError:
+        scan_scope = absolute_scan_root.replace("\\", "/")
+    if scan_scope == ".":
+        scan_scope = "project"
+    normalized_hashes = {
+        str(path).replace("\\", "/"): str(value)
+        for path, value in (file_content_hashes or {}).items()
+    }
+    observed_analyzers = sorted({
+        str(name) for name in (analyzers_observed or []) if name
+    } | {"cross_analyzer"})
+    reconcile_namespaces = [
+        f"xanalyze:{scan_scope}:{name}" for name in observed_analyzers
+    ]
+    stale_namespaces = [
+        f"xanalyze:{scan_scope}:{name}"
+        for name in sorted({
+            str(name) for name in (analyzers_failed or []) if name
+        })
+    ]
     observations: List[Dict[str, Any]] = []
 
     for finding in storeable_findings:
@@ -101,22 +152,32 @@ def auto_store_findings(
 
         context = {
             "scan_root": scan_root,
+            "scan_scope": scan_scope,
             "source_analyzer": finding["source_analyzer"],
             "finding_type": finding["finding_type"],
             "severity": finding["severity"],
             "file": finding["file"],
+            "related_files": finding.get("related_files", []),
+            "stable_subject": finding.get("stable_subject"),
             "batch_timestamp": timestamp,
-            "evidence_signature": evidence_signature,
+            "evidence_signature": graph_content_signature or evidence_signature,
+            "topological_signature": evidence_signature,
+            "graph_content_signature": graph_content_signature,
+            "source_content_sha256": normalized_hashes.get(
+                str(finding["file"]).replace("\\", "/")
+            ),
             "memory_scope_id": scope_id,
+            "observation_namespace": (
+                f"xanalyze:{scan_scope}:{finding['source_analyzer']}"
+            ),
         }
         identity_payload = {
             "scope_id": scope_id,
+            "scan_scope": scan_scope,
             "category": finding["category"],
             "source_analyzer": finding["source_analyzer"],
             "finding_type": finding["finding_type"],
-            "severity": finding["severity"],
-            "file": str(finding["file"]).replace("\\", "/"),
-            "content": " ".join(str(finding["content"]).split()),
+            "subject": finding.get("stable_subject"),
         }
         identity_json = json.dumps(identity_payload, sort_keys=True, separators=(",", ":"))
         dedup_key = f"finding:{hashlib.sha256(identity_json.encode('utf-8')).hexdigest()}"
@@ -130,11 +191,21 @@ def auto_store_findings(
             "context": context,
         })
 
-    result = upsert_memory_observations(observations)
+    result = upsert_memory_observations(
+        observations,
+        reconcile_namespaces=reconcile_namespaces,
+        stale_namespaces=stale_namespaces,
+        current_graph_signature=graph_content_signature,
+        active_files=[str(path) for path in (active_files or [])],
+        create_batch_links=False,
+    )
     result.update({
-        "status": "auto_observed",
+        "status": "auto_reconciled",
         "batch_timestamp": timestamp,
         "evidence_signature": evidence_signature,
+        "graph_content_signature": graph_content_signature,
+        "reconciled_namespaces": reconcile_namespaces,
+        "stale_namespaces": stale_namespaces,
         "memory_scope": runtime,
     })
     return result
@@ -143,12 +214,12 @@ def auto_store_findings(
 def check_consolidation_trigger() -> Dict[str, Any]:
     """Cek apakah kondisi memori memerlukan consolidation."""
     try:
-        from memory.store import load_store
+        from memory.store import load_store, is_semantically_current_memory
         from memory.graph import build_memory_graph
         from memory.analyzers import analyze_fragmentation
     except ImportError:
         try:
-            from memory_store import load_store
+            from memory_store import load_store, is_semantically_current_memory
             from memory_graph import build_memory_graph
             from memory_analyzers import analyze_fragmentation
         except ImportError:
@@ -156,7 +227,11 @@ def check_consolidation_trigger() -> Dict[str, Any]:
 
     store = load_store()
     memories = store.get("memories", [])
-    episodic_memories = [m for m in memories if m.get("type") == "episodic"]
+    episodic_memories = [
+        memory for memory in memories
+        if memory.get("type") == "episodic"
+        and is_semantically_current_memory(memory)
+    ]
     episodic_count = len(episodic_memories)
 
     unconsolidated = [

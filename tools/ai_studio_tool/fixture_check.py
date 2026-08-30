@@ -2384,6 +2384,42 @@ def test_f31_memory_topology_betti():
         f"{name}: steering tidak boleh mengubah parallel edge menjadi reasoning loop",
     )
 
+    # Analyzer batch order is provenance, not semantic knowledge cohesion.
+    provenance_association = {
+        "id": "batch-edge",
+        "from": "p1",
+        "to": "p2",
+        "type": "temporal",
+        "metadata": {"reason": "observation_batch_order", "layer": "provenance"},
+    }
+    semantic_view = build_memory_graph_from_data(
+        [
+            {"id": "p1", "type": "episodic"},
+            {"id": "p2", "type": "episodic"},
+        ],
+        [provenance_association],
+    )
+    expect(
+        semantic_view.get("summary", {}).get("total_associations") == 0,
+        f"{name}: batch-order provenance tidak boleh menjadi semantic edge",
+    )
+    expect(
+        semantic_view.get("summary", {}).get("provenance_associations_excluded") == 1,
+        f"{name}: excluded provenance edge harus terukur",
+    )
+    provenance_view = build_memory_graph_from_data(
+        [
+            {"id": "p1", "type": "episodic"},
+            {"id": "p2", "type": "episodic"},
+        ],
+        [provenance_association],
+        include_provenance=True,
+    )
+    expect(
+        provenance_view.get("summary", {}).get("total_associations") == 1,
+        f"{name}: provenance tetap dapat diaudit lewat filtration eksplisit",
+    )
+
     directed_graph = build_memory_graph_from_data(
         [
             {"id": "r1", "type": "semantic"},
@@ -2792,8 +2828,22 @@ def test_f38_memory_augmented_context_budget():
         )
         expect(
             result.get("provenance", {}).get("memory_retrieval", {}).get("claim_boundary")
-            == "deterministic lexical-and-path retrieval; not semantic embedding proof",
+            == (
+                "deterministic lexical-and-path retrieval with snapshot freshness gating; "
+                "not semantic embedding proof"
+            ),
             f"{name}: batas klaim retrieval harus eksplisit",
+        )
+        allocation = result.get("budget", {}).get("allocation", {})
+        expect(
+            allocation.get("source_grounding_satisfied") is True
+            and allocation.get("source_excerpt_line_count", 0) >= 1,
+            f"{name}: memory tidak boleh menghilangkan current-source witness",
+        )
+        prompt = result.get("context_block", "")
+        expect(
+            prompt.find("FILE ") < prompt.find("[PROJECT MEMORY EVIDENCE]"),
+            f"{name}: current source harus mendahului historical memory",
         )
 
         oversized = "Oversized sentinel historical evidence: " + ("x" * 2000)
@@ -2822,6 +2872,280 @@ def test_f38_memory_augmented_context_budget():
         expect(
             bounded.get("budget", {}).get("within_budget") is True,
             f"{name}: memory panjang tetap harus mematuhi hard budget",
+        )
+
+
+def test_f39_memory_semantic_integrity():
+    """Analyzer evidence is reconciled, freshness-gated, and not batch-linked."""
+    name = "F39"
+    with tempfile.TemporaryDirectory(prefix="ai-studio-memory-semantic-") as tmp:
+        root = Path(tmp)
+        state_dir = root / "state"
+        project = root / "project"
+        cache_dir = project / "src" / "cache"
+        async_dir = project / "src" / "async"
+        cache_dir.mkdir(parents=True)
+        async_dir.mkdir(parents=True)
+        cache_file = cache_dir / "cache.service.ts"
+        cache_file.write_text(
+            (ROOT / "fixtures_min/f20_cache_audit/project/src/cache.service.ts")
+            .read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+        (async_dir / "service.ts").write_text(
+            (ROOT / "fixtures_min/f17_async_waterfall/project/src/service.ts")
+            .read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+
+        _, first = _run_scoped_kernel(
+            state_dir,
+            project,
+            "xanalyze", str(project), "--output", "summary",
+            "--cache-mode", "refresh",
+        )
+        first_store = first.get("memory_store_result", {})
+        expect(first_store.get("stored_count", 0) >= 2, f"{name}: perlu multi-finding evidence")
+        expect(
+            first_store.get("associations_created") == 0
+            and first_store.get("batch_order_is_semantic_edge") is False,
+            f"{name}: analyzer batch tidak boleh membentuk semantic chain",
+        )
+        expect(
+            first_store.get("provenance_events_recorded") == 1
+            and str(first_store.get("graph_content_signature", "")).startswith("sha256:"),
+            f"{name}: batch provenance dan full graph signature harus tersimpan",
+        )
+
+        # Simulate one pre-lifecycle analyzer record. Migration must map its
+        # absolute scan root back to the stable project namespace so the next
+        # complete analyzer snapshot can resolve it rather than leave a zombie.
+        _, migration_stats = _run_scoped_kernel(
+            state_dir, project, "memory", "stats"
+        )
+        store_path = Path(migration_stats.get("runtime", {}).get("store_path", ""))
+        legacy_store = json.loads(store_path.read_text(encoding="utf-8"))
+        legacy_memory = legacy_store.get("memories", [])[0]
+        legacy_context = legacy_memory.setdefault("context", {})
+        legacy_context["dedup_key"] = "legacy:f39-pre-lifecycle"
+        legacy_context["scan_root"] = str(project)
+        legacy_context.pop("scan_scope", None)
+        legacy_context.pop("observation_namespace", None)
+        legacy_context.pop("evidence_status", None)
+        legacy_context.pop("revision_count", None)
+        legacy_context.pop("graph_content_signature", None)
+        legacy_context.pop("source_content_sha256", None)
+        store_path.write_text(json.dumps(legacy_store), encoding="utf-8")
+        _, migrated = _run_scoped_kernel(
+            state_dir,
+            project,
+            "xanalyze", str(project), "--output", "full",
+            "--cache-mode", "refresh",
+        )
+        expect(
+            migrated.get("memory_store_result", {}).get("stored_count", 0) >= 1
+            and migrated.get("memory_store_result", {}).get("resolved_count", 0) >= 1,
+            f"{name}: legacy evidence harus diganti lalu diselesaikan oleh snapshot current",
+        )
+        _, migrated_stats = _run_scoped_kernel(
+            state_dir, project, "memory", "stats"
+        )
+        expect(
+            migrated_stats.get("by_evidence_status", {}).get("resolved", 0) >= 1,
+            f"{name}: legacy evidence tanpa full signature tidak boleh tetap active",
+        )
+
+        # A failed analyzer cannot prove that its old finding disappeared. Its
+        # namespace becomes stale, then a successful full scan reactivates the
+        # same logical node when the finding is observed again.
+        failure_store = json.loads(store_path.read_text(encoding="utf-8"))
+        failure_memory = next(
+            memory for memory in failure_store.get("memories", [])
+            if memory.get("context", {}).get("evidence_status") == "active"
+            and memory.get("context", {}).get("source_analyzer") != "cross_analyzer"
+        )
+        failure_id = failure_memory["id"]
+        failure_memory["context"]["observation_namespace"] = (
+            "xanalyze:project:missing.analyzer"
+        )
+        store_path.write_text(json.dumps(failure_store), encoding="utf-8")
+        _, failed_scan = _run_scoped_kernel(
+            state_dir,
+            project,
+            "xanalyze", str(project), "--analyzers", "missing.analyzer",
+            "--output", "full", "--cache-mode", "refresh",
+            expect_success=False,
+        )
+        expect(
+            failure_id in failed_scan.get("memory_store_result", {}).get(
+                "stale_ids", []
+            ),
+            f"{name}: analyzer failure harus membuat evidence namespace stale",
+        )
+        _, recovered_scan = _run_scoped_kernel(
+            state_dir,
+            project,
+            "xanalyze", str(project), "--output", "full",
+            "--cache-mode", "refresh",
+        )
+        expect(
+            failure_id in recovered_scan.get("memory_store_result", {}).get(
+                "reused_ids", []
+            ),
+            f"{name}: analyzer recovery harus mengaktifkan logical evidence yang sama",
+        )
+
+        _, memory_summary = _run_scoped_kernel(
+            state_dir, project, "memory", "analyze", "--output", "summary"
+        )
+        stats = memory_summary.get("memory_stats", {})
+        expect(stats.get("total_associations") == 0, f"{name}: semantic graph harus tanpa batch edge")
+        expect(
+            stats.get("isolated_memories") == stats.get("total_memories"),
+            f"{name}: unrelated observations harus tetap terpisah",
+        )
+        expect(
+            memory_summary.get("topological_model", {}).get("filtration")
+            == "semantic_associations",
+            f"{name}: memory topology harus menyatakan filtration",
+        )
+        expect(
+            memory_summary.get("betti_numbers", {}).get("beta_0")
+            == stats.get("total_memories")
+            and memory_summary.get("betti_numbers", {}).get("beta_1") == 0
+            and memory_summary.get("memory_archetype") == "memory_modular",
+            f"{name}: summary harus membawa koordinat topology semantic langsung",
+        )
+        expect(
+            memory_summary.get("memory_health_model", {}).get(
+                "not_correctness_or_truth_score"
+            ) is True
+            and memory_summary.get("memory_health_model", {}).get(
+                "bridge_requires_relation_witness"
+            ) is True,
+            f"{name}: health scalar tidak boleh diklaim sebagai kualitas atau alasan bridge",
+        )
+
+        _, fresh_context = _run_scoped_kernel(
+            state_dir,
+            project,
+            "context", "nondeterministic cache key", str(project),
+            "--target", "src/cache/cache.service.ts",
+            "--budget-tokens", "400", "--output", "prompt",
+            "--cache-mode", "refresh",
+        )
+        fresh_selected = fresh_context.get("memory_context", {}).get("selected", [])
+        expect(
+            fresh_selected and fresh_selected[0].get("freshness") == "fresh",
+            f"{name}: evidence pada snapshot identik harus fresh",
+        )
+        expect(
+            fresh_context.get("budget", {}).get("allocation", {}).get(
+                "source_grounding_satisfied"
+            ) is True,
+            f"{name}: fresh memory tetap harus menyisakan source grounding",
+        )
+
+        # Change content without changing the file/import graph shape. Before
+        # reconciliation, old analyzer evidence must be gated as stale.
+        cache_file.write_text(
+            "export class CacheService {\n"
+            "  get(key: string): string { return key; }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        _, stale_context = _run_scoped_kernel(
+            state_dir,
+            project,
+            "context", "nondeterministic cache key", str(project),
+            "--target", "src/cache/cache.service.ts",
+            "--budget-tokens", "400", "--output", "prompt",
+            "--cache-mode", "refresh",
+        )
+        stale_retrieval = stale_context.get("memory_context", {}).get("retrieval", {})
+        expect(
+            stale_context.get("memory_context", {}).get("selected_count") == 0,
+            f"{name}: stale analyzer memory tidak boleh mencapai prompt",
+        )
+        expect(
+            stale_retrieval.get("excluded_by_freshness", {}).get("stale", 0) >= 1,
+            f"{name}: stale exclusion harus terukur",
+        )
+        expect(
+            stale_context.get("budget", {}).get("allocation", {}).get(
+                "source_excerpt_line_count", 0
+            ) >= 1,
+            f"{name}: current source harus tetap tersedia ketika memory ditolak",
+        )
+
+        _, reconciled = _run_scoped_kernel(
+            state_dir,
+            project,
+            "xanalyze", str(project), "--output", "full",
+            "--cache-mode", "refresh",
+        )
+        reconcile_result = reconciled.get("memory_store_result", {})
+        expect(
+            reconcile_result.get("resolved_count", 0) >= 1,
+            f"{name}: finding yang hilang harus menjadi resolved",
+        )
+        resolved_ids = set(reconcile_result.get("resolved_ids", []))
+        consolidation_ids = set(
+            reconciled.get("consolidation_signal", {}).get("candidate_ids", [])
+        )
+        expect(
+            resolved_ids.isdisjoint(consolidation_ids),
+            f"{name}: resolved evidence tidak boleh menjadi kandidat konsolidasi",
+        )
+        _, unconsolidated = _run_scoped_kernel(
+            state_dir, project, "memory", "unconsolidated_tags"
+        )
+        unconsolidated_ids = {
+            item.get("id")
+            for group in unconsolidated.get("tag_groups", {}).values()
+            for item in group.get("memories", [])
+        }
+        expect(
+            resolved_ids.isdisjoint(unconsolidated_ids),
+            f"{name}: historical evidence tidak boleh masuk auto-consolidation groups",
+        )
+        _, final_stats = _run_scoped_kernel(state_dir, project, "memory", "stats")
+        expect(
+            final_stats.get("by_evidence_status", {}).get("resolved", 0) >= 1,
+            f"{name}: lifecycle resolved harus terlihat dalam stats",
+        )
+        _, final_graph = _run_scoped_kernel(
+            state_dir, project, "memory", "analyze", "--output", "summary"
+        )
+        graph_stats = final_graph.get("memory_stats", {})
+        expect(
+            sum(graph_stats.get("by_evidence_status", {}).values())
+            == graph_stats.get("total_memories"),
+            f"{name}: lifecycle semantic view harus konsisten dengan vertex count",
+        )
+        expect(
+            graph_stats.get("historical_memories_excluded", 0) >= 1,
+            f"{name}: historical exclusion harus eksplisit pada graph summary",
+        )
+        _, audit_graph = _run_scoped_kernel(
+            state_dir,
+            project,
+            "memory", "analyze", "--output", "summary",
+            "--include-historical", "--include-provenance",
+        )
+        expect(
+            audit_graph.get("memory_stats", {}).get("total_memories", 0)
+            > graph_stats.get("total_memories", 0),
+            f"{name}: CLI audit filtration harus dapat melihat historical evidence",
+        )
+        expect(
+            audit_graph.get("topological_model", {}).get(
+                "historical_evidence_excluded"
+            ) is False
+            and audit_graph.get("topological_model", {}).get(
+                "provenance_batch_order_excluded"
+            ) is False,
+            f"{name}: CLI audit filtration harus terlihat pada model metadata",
         )
 
 
@@ -3159,6 +3483,7 @@ def main():
         test_f36_analyzer_evidence_cache,
         test_f37_memory_runtime_integrity,
         test_f38_memory_augmented_context_budget,
+        test_f39_memory_semantic_integrity,
         test_kernel_wiring_smoke,
         test_kernel_cli_contract,
     ]
@@ -3175,7 +3500,7 @@ def main():
             print(f"- {failure}")
         sys.exit(1)
 
-    print("PASS: 35 fixture minimal + 2 portable integration smoke aman")
+    print("PASS: 36 fixture minimal + 2 portable integration smoke aman")
 
 
 if __name__ == "__main__":

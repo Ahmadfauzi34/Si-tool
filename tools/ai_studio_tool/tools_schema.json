@@ -1,7 +1,7 @@
 [
   {
     "name": "hott_kernel",
-    "description": "Unified HoTT Kernel: single entry point untuk seluruh analisis codebase dan memory store. Menjalankan 13 codebase analyzer (topo, perf, hott) dan 6 memory analyzer. Persistent SharedGraph cache memakai invalidasi file-level; persistent analyzer-evidence cache memakai exact semantic-graph + engine signature. Project-scoped memory memakai locking, atomic JSON, backup recovery, dan dedup observasi. Mode 'context' membuat query-directed context pack dengan graph evidence, scoped memory evidence, quotient boundary, provenance, dan hard budget. Mode 'cache' menginspeksi, me-refresh, atau membersihkan kedua lapis cache. Mode 'analyze' untuk findings, 'synthesize' untuk fingerprint + health score + correlations, 'steer' untuk drift detection + steering signals, 'establish' untuk baseline, 'impact'/'outline'/'brief' untuk targeted file analysis, 'memory_*' untuk memory domain, 'xanalyze'/'xsteer'/'xcontext' untuk cross-domain intelligence.",
+    "description": "Unified HoTT Kernel: single entry point untuk seluruh analisis codebase dan memory store. Menjalankan 13 codebase analyzer (topo, perf, hott) dan 6 memory analyzer. Persistent SharedGraph cache memakai invalidasi file-level; persistent analyzer-evidence cache memakai exact semantic-graph + engine signature. Project-scoped memory memakai locking, atomic JSON, backup recovery, logical finding reconciliation, evidence lifecycle, dan semantic/provenance filtration. Mode 'context' membuat query-directed context pack dengan graph evidence, freshness-gated scoped memory, quotient boundary, provenance, source-grounding floor, memory cap 35%, dan hard budget. Mode 'cache' menginspeksi, me-refresh, atau membersihkan kedua lapis cache. Mode 'analyze' untuk findings, 'synthesize' untuk fingerprint + health score + correlations, 'steer' untuk drift detection + steering signals, 'establish' untuk baseline, 'impact'/'outline'/'brief' untuk targeted file analysis, 'memory_*' untuk memory domain, 'xanalyze'/'xsteer'/'xcontext' untuk cross-domain intelligence.",
     "parameters": {
       "type": "OBJECT",
       "properties": {
@@ -64,6 +64,14 @@
         "output": {
           "type": "STRING",
           "description": "Format output umum: full | summary | findings | graph. Mode context: prompt | summary | full, default prompt."
+        },
+        "include_historical": {
+          "type": "BOOLEAN",
+          "description": "Mode memory_analyze saja: audit analyzer evidence resolved/stale/orphaned/superseded. Default false agar semantic topology hanya memakai current evidence."
+        },
+        "include_provenance": {
+          "type": "BOOLEAN",
+          "description": "Mode memory_analyze saja: audit association layer provenance seperti legacy observation batch order. Default false."
         }
       },
       "required": [
