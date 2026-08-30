@@ -3149,6 +3149,242 @@ def test_f39_memory_semantic_integrity():
         )
 
 
+def test_f40_bounded_provenance_retention():
+    """Repeated evidence batches coalesce and old detail becomes a bounded checkpoint."""
+    name = "F40"
+    from memory.runtime import (
+        configure_memory_runtime,
+        reset_memory_runtime_configuration,
+    )
+    from memory.store import (
+        get_memory_stats,
+        load_store,
+        save_store,
+        upsert_memory_observations,
+    )
+    from memory.provenance import (
+        apply_provenance_retention,
+        default_provenance_retention,
+        provenance_retention_snapshot,
+    )
+
+    with tempfile.TemporaryDirectory(prefix="ai-studio-memory-retention-") as tmp:
+        root = Path(tmp)
+        state_dir = root / "state"
+        project = root / "project"
+        project.mkdir(parents=True)
+        namespace = "xanalyze:project:perf.cache"
+        file_path = "src/cache.service.ts"
+        graph_a = "sha256:" + "a" * 64
+        graph_b = "sha256:" + "b" * 64
+        graph_c = "sha256:" + "c" * 64
+        graph_d = "sha256:" + "d" * 64
+
+        def observation(content: str, source_hash: str) -> dict:
+            return {
+                "dedup_key": "perf.cache:nondeterministic_cache_key:src/cache.service.ts",
+                "memory_type": "episodic",
+                "content": content,
+                "source": "analyzer:perf.cache",
+                "importance": 0.9,
+                "tags": ["perf.cache", "cache"],
+                "context": {
+                    "observation_namespace": namespace,
+                    "source_analyzer": "perf.cache",
+                    "severity": "high",
+                    "file": file_path,
+                    "source_content_sha256": source_hash,
+                    "evidence_signature": source_hash,
+                },
+            }
+
+        def reconcile(items, graph_signature):
+            return upsert_memory_observations(
+                items,
+                reconcile_namespaces=[namespace],
+                current_graph_signature=graph_signature,
+                active_files=[file_path],
+                provenance_event_limit=3,
+            )
+
+        configure_memory_runtime(
+            project_root=str(project),
+            state_dir=str(state_dir),
+        )
+        try:
+            first = reconcile(
+                [observation("Date.now() cache key", "sha256:source-a")],
+                graph_a,
+            )
+            second = reconcile(
+                [observation("Date.now() cache key", "sha256:source-a")],
+                graph_a,
+            )
+            third = reconcile(
+                [observation("Date.now() cache key", "sha256:source-a")],
+                graph_a,
+            )
+            expect(
+                first.get("provenance_event_records_added") == 1,
+                f"{name}: run awal harus detail",
+            )
+            expect(
+                second.get("provenance_event_coalesced") is False,
+                f"{name}: store dan reuse adalah transisi berbeda",
+            )
+            expect(
+                third.get("provenance_event_coalesced") is True
+                and third.get("provenance_event_records_added") == 0,
+                f"{name}: steady-state identik harus coalesce",
+            )
+            after_repeat = third.get("provenance_retention", {})
+            expect(
+                after_repeat.get("retained_event_records") == 2
+                and after_repeat.get("retained_batch_occurrences") == 3,
+                f"{name}: record detail berkurang tanpa kehilangan occurrence count",
+            )
+
+            revised = reconcile(
+                [observation("stable cache key", "sha256:source-b")],
+                graph_b,
+            )
+            expect(
+                revised.get("revised_count") == 1,
+                f"{name}: mutation harus menjadi revision",
+            )
+
+            resolved = reconcile([], graph_c)
+            expect(
+                resolved.get("resolved_count") == 1
+                and resolved.get("provenance_event_records_compacted") == 1,
+                f"{name}: lifecycle transition harus detail dan memicu batas hot history",
+            )
+            steady_resolved = reconcile([], graph_c)
+            expect(
+                steady_resolved.get("provenance_batch_occurrences_compacted") == 2,
+                f"{name}: archived coalesced record harus mempertahankan dua occurrence",
+            )
+            repeated_resolved = reconcile([], graph_c)
+            expect(
+                repeated_resolved.get("provenance_event_coalesced") is True,
+                f"{name}: resolved steady-state identik juga harus coalesce",
+            )
+
+            reactivated = reconcile(
+                [observation("stable cache key", "sha256:source-b")],
+                graph_d,
+            )
+            retention = reactivated.get("provenance_retention", {})
+            expect(
+                reactivated.get("reused_count") == 1
+                and reactivated.get("revised_count") == 1,
+                f"{name}: historical node harus reaktif tanpa identitas baru",
+            )
+            expect(
+                retention.get("hot_history_bounded") is True
+                and retention.get("retained_event_records") == 3
+                and retention.get("observation_event_limit") == 3,
+                f"{name}: detailed observation history harus hard-bounded",
+            )
+            expect(
+                retention.get("total_batch_occurrences") == 8
+                and retention.get("archived_event_records") == 3
+                and retention.get("archived_batch_occurrences") == 4,
+                f"{name}: total run harus tetap audit-countable setelah compaction",
+            )
+            expect(
+                retention.get("archived_lifecycle_totals", {}).get("stored") == 1
+                and retention.get("archived_lifecycle_totals", {}).get("reused") == 3
+                and retention.get("archived_lifecycle_totals", {}).get("revised") == 1,
+                f"{name}: lifecycle archive aggregate harus mempertahankan multiplicity",
+            )
+            expect(
+                str(retention.get("checkpoint_digest", "")).startswith("sha256:")
+                and retention.get("counts_preserved") is True
+                and retention.get("archived_detail_recoverable") is False,
+                f"{name}: checkpoint harus punya sequence commitment tanpa klaim detail recoverable",
+            )
+
+            store = load_store()
+            observation_events = [
+                event for event in store.get("events", [])
+                if event.get("type") == "observation_batch"
+            ]
+            expect(len(observation_events) == 3, f"{name}: raw hot event list harus bounded")
+            expect(
+                all(
+                    event.get("occurrence_count", 0) >= 1
+                    and str(event.get("event_signature", "")).startswith("sha256:")
+                    and event.get("first_timestamp")
+                    and event.get("last_timestamp")
+                    for event in observation_events
+                ),
+                f"{name}: retained event harus punya interval, multiplicity, dan signature",
+            )
+            memory = store.get("memories", [])[0]
+            expect(
+                memory.get("context", {}).get("observation_count") == 5
+                and memory.get("context", {}).get("revision_count") == 3
+                and memory.get("context", {}).get("evidence_status") == "active",
+                f"{name}: event retention tidak boleh mengubah semantic evidence lifecycle",
+            )
+
+            # A pre-retention event has only timestamp + payload. Loading/saving
+            # must normalize and coalesce it without treating it as a new memory.
+            legacy_event = json.loads(json.dumps(observation_events[-1]))
+            for field in (
+                "occurrence_count",
+                "event_signature",
+                "first_timestamp",
+                "last_timestamp",
+            ):
+                legacy_event.pop(field, None)
+            store["events"].append(legacy_event)
+            save_store(store)
+            migrated_stats = get_memory_stats().get("provenance_retention", {})
+            expect(
+                migrated_stats.get("total_batch_occurrences") == 9
+                and migrated_stats.get("retained_event_records") == 3
+                and migrated_stats.get("coalesced_batch_occurrences") == 3,
+                f"{name}: legacy event harus bermigrasi ke bounded representation",
+            )
+
+            # Archived namespace cardinality must also be bounded over time.
+            namespace_store = {
+                "events": [],
+                "provenance_retention": default_provenance_retention(1),
+            }
+            namespace_store["provenance_retention"][
+                "archived_namespace_limit"
+            ] = 2
+            for index in range(4):
+                namespace_store["events"].append({
+                    "type": "observation_batch",
+                    "timestamp": f"2026-08-30T00:00:0{index}Z",
+                    "namespaces": [f"namespace-{index}"],
+                    "stale_namespaces": [],
+                    "graph_content_signature": f"sha256:graph-{index}",
+                    "observed_ids": [],
+                    "stored_ids": [],
+                    "reused_ids": [],
+                    "revised_ids": [],
+                    "resolved_ids": [],
+                    "orphaned_ids": [],
+                    "stale_ids": [],
+                })
+                apply_provenance_retention(namespace_store, 1)
+            namespace_stats = provenance_retention_snapshot(namespace_store)
+            expect(
+                len(namespace_stats.get("archived_by_namespace", {})) == 2
+                and namespace_stats.get(
+                    "archived_namespace_overflow_occurrences"
+                ) == 1,
+                f"{name}: namespace archive harus bounded dengan overflow counter",
+            )
+        finally:
+            reset_memory_runtime_configuration()
+
+
 def _run_kernel(*args):
     env = dict(os.environ)
     env["PYTHONDONTWRITEBYTECODE"] = "1"
@@ -3484,6 +3720,7 @@ def main():
         test_f37_memory_runtime_integrity,
         test_f38_memory_augmented_context_budget,
         test_f39_memory_semantic_integrity,
+        test_f40_bounded_provenance_retention,
         test_kernel_wiring_smoke,
         test_kernel_cli_contract,
     ]
@@ -3500,7 +3737,7 @@ def main():
             print(f"- {failure}")
         sys.exit(1)
 
-    print("PASS: 36 fixture minimal + 2 portable integration smoke aman")
+    print("PASS: 37 fixture minimal + 2 portable integration smoke aman")
 
 
 if __name__ == "__main__":

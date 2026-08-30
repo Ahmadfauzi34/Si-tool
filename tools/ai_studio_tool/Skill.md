@@ -349,6 +349,14 @@ lifecycle seluruh store melalui `store_by_evidence_status`; jumlah
 | `memory_stats.historical_memories_excluded` | > 0 | Ada evidence historis yang disimpan untuk audit tetapi tidak memengaruhi topology kini |
 | `memory_stats.provenance_associations_excluded` | > 0 | Ada provenance edge yang sengaja bukan semantic relation |
 
+Gunakan `memory stats` untuk audit pertumbuhan journal. Field
+`provenance_retention.hot_history_bounded=true` membuktikan jumlah record detail
+`observation_batch` tidak melewati policy limit. `total_batch_occurrences` tetap
+menghitung run retained + archived, sedangkan
+`archived_detail_recoverable=false` berarti checkpoint hanya mempertahankan
+aggregate dan sequence commitment—jangan mengarang ID/path event lama dari
+checkpoint tersebut.
+
 ### 4.4 Reading `fiber status` Output
 
 | Field | Interpretasi |
@@ -376,6 +384,11 @@ lifecycle seluruh store melalui `store_by_evidence_status`; jumlah
 | `memory_store_result.stale_count` | Analyzer gagal sehingga evidence lama belum tervalidasi pada snapshot kini |
 | `memory_store_result.duplicate_input_count` | Evidence duplikat dalam batch yang dikuotienkan |
 | `memory_store_result.batch_order_is_semantic_edge=false` | Urutan batch disimpan sebagai provenance event, bukan association semantic |
+| `memory_store_result.provenance_event_records_added` | `1` untuk record detail baru; `0` bila batch steady-state dicoalesce |
+| `memory_store_result.provenance_event_coalesced` | Run identik berturut-turut menambah `occurrence_count`, bukan panjang event list |
+| `memory_store_result.provenance_event_records_compacted` | Record detail lama yang dipindahkan ke aggregate checkpoint pada transaksi ini |
+| `memory_store_result.provenance_retention.hot_history_bounded` | Harus `true`; default maksimal 128 observation records |
+| `memory_store_result.provenance_retention.archived_detail_recoverable` | Selalu `false`; archive mempertahankan count/digest, bukan payload lama |
 | `memory_store_result.graph_content_signature` | Snapshot penuh yang menjadi dasar evidence |
 | `consolidation_signal.consolidation_candidate` | Apakah perlu konsolidasi |
 | `analysis_summary.health_score` | Kesehatan codebase |
@@ -481,6 +494,11 @@ hott_kernel.py memory drift
 hott_kernel.py memory betti_breakdown
 hott_kernel.py memory stats
 ```
+
+`memory stats` adalah jalur inspeksi bounded provenance. Default policy menahan
+128 record observation detail dan 256 namespace archive. Kebijakan ini hanya
+berlaku pada `observation_batch`; consolidation event tetap exact karena
+merupakan perubahan semantic yang eksplisit.
 
 ### Fiber Operations
 ```bash

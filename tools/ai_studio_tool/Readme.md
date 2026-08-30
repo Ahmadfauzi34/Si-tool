@@ -5,7 +5,7 @@
 
 > **Schema Version:** 4.1.0-memory
 > **Entry Point:** `tools/ai_studio_tool/hott_kernel.py`
-> **Fixture Baseline:** 36 fixture minimal + 2 portable integration smoke PASS
+> **Fixture Baseline:** 37 fixture minimal + 2 portable integration smoke PASS
 
 ---
 
@@ -218,6 +218,22 @@ hilang menjadi `orphaned`. Reconciliation dipisahkan per project/scan/analyzer
 namespace agar analyzer yang gagal tidak menyelesaikan evidence milik analyzer
 tersebut secara keliru. Bila analyzer gagal, evidence lamanya menjadi `stale`
 sampai snapshot sukses berikutnya mengaktifkan atau menyelesaikannya.
+
+Journal `observation_batch` memakai bounded provenance retention. Run identik
+berturut-turut disimpan sebagai satu record dengan `occurrence_count`,
+`first_timestamp`, `last_timestamp`, dan deterministic `event_signature`.
+Hot history menyimpan paling banyak 128 record observation detail. Record yang
+lebih lama diringkas menjadi jumlah occurrence per lifecycle/namespace dan
+`sha256-chain-v1` checkpoint; jumlah batch tetap dapat dihitung, tetapi detail
+yang sudah diringkas **tidak dapat direkonstruksi**
+(`archived_detail_recoverable=false`). Namespace archive dibatasi 256 key dan
+kelebihannya masuk counter overflow. Event semantic seperti consolidation tidak
+ikut dipangkas oleh kebijakan observation provenance ini.
+
+`memory stats` membawa `provenance_retention`: jumlah record/occurrence retained
+dan archived, jumlah run yang dicoalesce, lifecycle aggregate, checkpoint digest,
+serta invariant `hot_history_bounded`. Hasil `xanalyze` juga menjelaskan apakah
+batch menambah record, dicoalesce, atau memicu compaction.
 
 Setiap evidence membawa full `graph_content_signature` dan, bila file-oriented,
 `source_content_sha256`. Mode `context` membandingkannya dengan snapshot kini:
@@ -602,6 +618,7 @@ tools/ai_studio_tool/
 │
 ├── memory/                          # Topological Memory Domain (Layer 2)
 │   ├── store.py                     # CRUD, associations, retrieval
+│   ├── provenance.py                # Bounded observation journal + checkpoint
 │   ├── graph.py                     # Memory graph & adjacency builder
 │   ├── analyzers.py                 # Memory fragmentation, hub, manifold, Betti
 │   ├── betti.py                     # Edge-type-aware Betti breakdown
@@ -671,7 +688,7 @@ Tidak semua hal perlu terhubung. β₀ tinggi bisa valid jika memang domain berb
 | Memory operations | 12 |
 | Fiber operations | 8 |
 | Safety checks | 2 (cycle prevention, fiber compatibility) |
-| Fixture baseline | 36 fixture minimal + 2 portable integration smoke PASS |
+| Fixture baseline | 37 fixture minimal + 2 portable integration smoke PASS |
 | Directed-cycle safety | 0 directed reasoning witness untuk safe bridge |
 | Zero-dependency | Python 3 stdlib only |
 
