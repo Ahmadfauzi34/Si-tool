@@ -33,7 +33,8 @@ MEMORY_ARCHETYPE_STRATEGY = {
     "memory_modular": (
         "isolated_exploration",
         "Memory has disconnected clusters. Explore each cluster independently. "
-        "Cross-cluster reasoning requires explicit bridge-building."
+        "Cross-cluster reasoning requires an explicit relation witness; do not "
+        "bridge merely to reduce component count."
     ),
     "memory_sparse_cyclic": (
         "cycle_aware_recall",
@@ -51,9 +52,9 @@ MEMORY_ARCHETYPE_STRATEGY = {
         "associations. Use targeted filtering."
     ),
     "memory_fragmented_sparse_cyclic": (
-        "bridge_building",
+        "component_localized_recall",
         "Multiple disconnected memory clusters with sparse cycles. "
-        "Priority: build bridges between clusters before cross-domain reasoning."
+        "Reason inside each component first; bridge only when evidence proves a relation."
     ),
     "memory_fragmented_cyclic": (
         "component_mapping",
@@ -261,7 +262,7 @@ def generate_memory_steering_signals(
     # Attention priorities dari Betti numbers
     attention = []
     if betti.get("beta_0", 0) > 1:
-        attention.append("knowledge_fragmentation")
+        attention.append("multiple_semantic_components")
     if betti.get("beta_1", 0) > 0:
         attention.append("association_cycle_rank_present")
     if directed_reasoning_cycle_witness_count > 0:
@@ -269,7 +270,7 @@ def generate_memory_steering_signals(
     if betti.get("beta_2", 0) > 0:
         attention.append("missing_abstraction")
     if health_score < 0.5:
-        attention.append("low_memory_health")
+        attention.append("high_structural_pressure_not_quality_judgment")
 
     return {
         "reasoning_strategy": strategy,

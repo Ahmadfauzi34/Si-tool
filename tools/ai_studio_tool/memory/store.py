@@ -7,6 +7,7 @@ Supports episodic, semantic, and procedural memory types.
 """
 
 import copy
+import os
 import re
 import uuid
 import datetime
@@ -40,6 +41,19 @@ REASONING_EDGE_TYPES = {"inferential", "causal"}
 MEMORY_STATUS_ACTIVE = "active"
 MEMORY_STATUS_ARCHIVED = "archived"
 
+EVIDENCE_STATUS_ACTIVE = "active"
+EVIDENCE_STATUS_RESOLVED = "resolved"
+EVIDENCE_STATUS_STALE = "stale"
+EVIDENCE_STATUS_ORPHANED = "orphaned"
+EVIDENCE_STATUS_SUPERSEDED = "superseded"
+EVIDENCE_STATUS_UNVERIFIED = "unverified"
+INACTIVE_EVIDENCE_STATUSES = {
+    EVIDENCE_STATUS_RESOLVED,
+    EVIDENCE_STATUS_STALE,
+    EVIDENCE_STATUS_ORPHANED,
+    EVIDENCE_STATUS_SUPERSEDED,
+}
+
 
 class ReasoningCycleRejectedError(ValueError):
     """A reasoning association would close a directed path."""
@@ -64,6 +78,27 @@ def _get_status(memory: Dict[str, Any]) -> str:
     return memory.get("status", MEMORY_STATUS_ACTIVE)
 
 
+def _get_evidence_status(memory: Dict[str, Any]) -> str:
+    """Return analyzer-evidence lifecycle without changing manual memories."""
+    context = memory.get("context", {})
+    if not context.get("dedup_key"):
+        return EVIDENCE_STATUS_UNVERIFIED
+    return str(context.get("evidence_status", EVIDENCE_STATUS_ACTIVE))
+
+
+def is_semantically_current_memory(memory: Dict[str, Any]) -> bool:
+    """Return whether a memory may participate in current semantic automation.
+
+    Manual memories have the ``unverified`` evidence status and remain eligible.
+    Analyzer evidence that is historical stays in the store for audit, but must
+    not silently influence consolidation or semantic graph decisions.
+    """
+    return (
+        _get_status(memory) == MEMORY_STATUS_ACTIVE
+        and _get_evidence_status(memory) not in INACTIVE_EVIDENCE_STATUSES
+    )
+
+
 def _generate_id(memory_type: str) -> str:
     """Generate unique ID dengan prefix tipe."""
     prefix_map = {"episodic": "ep", "semantic": "sem", "procedural": "proc"}
@@ -74,6 +109,28 @@ def _generate_id(memory_type: str) -> str:
 
 def _now_iso() -> str:
     return datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _legacy_scan_scope(scan_root: Any, project_root: Any) -> str:
+    """Map pre-lifecycle scan roots to the stable relative namespace."""
+    raw = str(scan_root or ".").replace("\\", "/").rstrip("/") or "."
+    project = os.path.abspath(str(project_root or os.getcwd()))
+    if raw == ".":
+        return "project"
+    if os.path.isabs(raw):
+        try:
+            relative = os.path.relpath(os.path.abspath(raw), project).replace("\\", "/")
+        except ValueError:
+            return raw
+        if relative == ".":
+            return "project"
+        if relative != ".." and not relative.startswith("../"):
+            return relative
+        return raw
+    normalized = os.path.normpath(raw).replace("\\", "/")
+    if normalized == os.path.basename(project):
+        return "project"
+    return normalized
 
 
 def _default_store() -> Dict[str, Any]:
@@ -133,6 +190,30 @@ def _normalize_store(store: Dict[str, Any]) -> Dict[str, Any]:
     store.setdefault("updated_at", store["created_at"])
     store.setdefault("events", [])
     paths = get_memory_runtime_paths(create=True)
+    for memory in store.get("memories", []):
+        context = memory.setdefault("context", {})
+        if not context.get("dedup_key"):
+            continue
+        if not context.get("evidence_status"):
+            if context.get("graph_content_signature"):
+                context["evidence_status"] = EVIDENCE_STATUS_ACTIVE
+            else:
+                # Pre-lifecycle analyzer records cannot be proven to describe
+                # the current full source snapshot. Preserve them for audit,
+                # but keep them out of semantic automation until re-observed.
+                context["evidence_status"] = EVIDENCE_STATUS_STALE
+                context.setdefault(
+                    "migration_reason",
+                    "legacy_evidence_missing_graph_content_signature",
+                )
+        context.setdefault("revision_count", 1)
+        if not context.get("observation_namespace"):
+            analyzer = str(context.get("source_analyzer", "unknown"))
+            scan_scope = _legacy_scan_scope(
+                context.get("scan_root", "."), paths.get("project_root")
+            )
+            context.setdefault("scan_scope", scan_scope)
+            context["observation_namespace"] = f"xanalyze:{scan_scope}:{analyzer}"
     store["scope"] = {
         "scope_id": paths["scope_id"],
         "scope_kind": paths["scope_kind"],
@@ -224,12 +305,20 @@ def upsert_memory_observations(
     *,
     link_type: str = "temporal",
     link_strength: float = 0.6,
+    reconcile_namespaces: Optional[List[str]] = None,
+    stale_namespaces: Optional[List[str]] = None,
+    current_graph_signature: Optional[str] = None,
+    active_files: Optional[List[str]] = None,
+    create_batch_links: bool = False,
 ) -> Dict[str, Any]:
-    """Atomically store or re-observe deterministic analyzer evidence.
+    """Atomically reconcile one analyzer-evidence snapshot.
 
-    ``dedup_key`` is mandatory for every observation. Re-observation updates
-    timestamps and counters on the same node rather than adding a duplicate
-    point to the memory graph.
+    ``dedup_key`` identifies the logical finding, while content/severity/hash
+    changes create revisions on that same node. Findings absent from a fully
+    observed namespace become resolved (or orphaned when their file vanished).
+    Batch ordering is provenance and is recorded as an event; it is not a
+    semantic association unless the compatibility flag ``create_batch_links``
+    is explicitly enabled.
     """
     if link_type not in ASSOCIATION_TYPES:
         raise ValueError(f"Invalid association type: {link_type}")
@@ -240,6 +329,15 @@ def upsert_memory_observations(
             raise ValueError(f"Invalid memory type: {observation.get('memory_type')}")
 
     input_count = len(observations)
+    normalized_active_files = (
+        {str(path).replace("\\", "/") for path in active_files}
+        if active_files is not None
+        else None
+    )
+    namespace_set = {str(value) for value in (reconcile_namespaces or []) if value}
+    stale_namespace_set = {
+        str(value) for value in (stale_namespaces or []) if value
+    } - namespace_set
     unique_by_key: Dict[str, Dict[str, Any]] = {}
     for observation in observations:
         dedup_key = str(observation["dedup_key"])
@@ -267,15 +365,31 @@ def upsert_memory_observations(
         }
         stored_ids: List[str] = []
         reused_ids: List[str] = []
+        revised_ids: List[str] = []
         observed_ids: List[str] = []
+        active_keys_by_namespace: Dict[str, set] = {
+            namespace: set() for namespace in namespace_set
+        }
 
         for observation in unique_observations:
             dedup_key = str(observation["dedup_key"])
             context = copy.deepcopy(observation.get("context") or {})
             context["dedup_key"] = dedup_key
+            namespace = str(context.get("observation_namespace", ""))
+            if namespace:
+                active_keys_by_namespace.setdefault(namespace, set()).add(dedup_key)
+            context["evidence_status"] = EVIDENCE_STATUS_ACTIVE
+            if current_graph_signature:
+                context["graph_content_signature"] = current_graph_signature
             existing = by_key.get(dedup_key)
             if existing is not None:
                 existing_context = existing.setdefault("context", {})
+                previous_revision = (
+                    str(existing.get("content", "")),
+                    str(existing_context.get("severity", "")),
+                    str(existing_context.get("source_content_sha256", "")),
+                    str(existing_context.get("graph_content_signature", "")),
+                )
                 previous_signature = existing_context.get("evidence_signature")
                 if previous_signature:
                     existing_context.setdefault("first_evidence_signature", previous_signature)
@@ -289,7 +403,27 @@ def upsert_memory_observations(
                 existing_context["observation_count"] = int(
                     existing_context.get("observation_count", 1)
                 ) + 1
-                existing["content"] = str(observation.get("content", existing.get("content", "")))
+                next_content = str(observation.get("content", existing.get("content", "")))
+                next_revision = (
+                    next_content,
+                    str(context.get("severity", "")),
+                    str(context.get("source_content_sha256", "")),
+                    str(context.get("graph_content_signature", "")),
+                )
+                revision_count = int(existing_context.get("revision_count", 1))
+                if next_revision != previous_revision:
+                    revision_count += 1
+                    revised_ids.append(existing["id"])
+                existing_context["revision_count"] = revision_count
+                existing_context["evidence_status"] = EVIDENCE_STATUS_ACTIVE
+                existing_context.pop("resolved_at", None)
+                existing_context.pop("resolved_graph_content_signature", None)
+                existing_context.pop("resolution_reason", None)
+                existing_context.pop("stale_at", None)
+                existing_context.pop("stale_reason", None)
+                existing_context.pop("stale_graph_content_signature", None)
+                existing_context.pop("migration_reason", None)
+                existing["content"] = next_content
                 existing["source"] = str(observation.get("source", existing.get("source", "manual")))
                 existing["importance"] = max(
                     float(existing.get("importance", 0.0)),
@@ -307,6 +441,7 @@ def upsert_memory_observations(
             context.setdefault("first_observed_at", now)
             context["last_observed_at"] = now
             context["observation_count"] = 1
+            context["revision_count"] = 1
             if context.get("evidence_signature"):
                 context["first_evidence_signature"] = context["evidence_signature"]
                 context["last_evidence_signature"] = context["evidence_signature"]
@@ -323,12 +458,76 @@ def upsert_memory_observations(
             stored_ids.append(memory["id"])
             observed_ids.append(memory["id"])
 
+        resolved_ids: List[str] = []
+        orphaned_ids: List[str] = []
+        for memory in store["memories"]:
+            context = memory.get("context", {})
+            namespace = str(context.get("observation_namespace", ""))
+            if namespace not in namespace_set:
+                continue
+            dedup_key = str(context.get("dedup_key", ""))
+            if dedup_key in active_keys_by_namespace.get(namespace, set()):
+                continue
+            if _get_evidence_status(memory) not in {
+                EVIDENCE_STATUS_ACTIVE,
+                EVIDENCE_STATUS_STALE,
+            }:
+                continue
+            file_path = str(context.get("file", "")).replace("\\", "/")
+            if (
+                file_path
+                and normalized_active_files is not None
+                and file_path not in normalized_active_files
+            ):
+                evidence_status = EVIDENCE_STATUS_ORPHANED
+                orphaned_ids.append(memory["id"])
+                reason = "source_file_absent_from_current_snapshot"
+            else:
+                evidence_status = EVIDENCE_STATUS_RESOLVED
+                resolved_ids.append(memory["id"])
+                reason = "finding_absent_from_current_analyzer_snapshot"
+            context["evidence_status"] = evidence_status
+            context["resolved_at"] = now
+            context["resolution_reason"] = reason
+            if current_graph_signature:
+                context["resolved_graph_content_signature"] = current_graph_signature
+
+        stale_ids: List[str] = []
+        for memory in store["memories"]:
+            context = memory.get("context", {})
+            namespace = str(context.get("observation_namespace", ""))
+            if namespace not in stale_namespace_set:
+                continue
+            if _get_evidence_status(memory) != EVIDENCE_STATUS_ACTIVE:
+                continue
+            file_path = str(context.get("file", "")).replace("\\", "/")
+            if (
+                file_path
+                and normalized_active_files is not None
+                and file_path not in normalized_active_files
+            ):
+                context["evidence_status"] = EVIDENCE_STATUS_ORPHANED
+                context["resolved_at"] = now
+                context["resolution_reason"] = (
+                    "source_file_absent_from_current_snapshot"
+                )
+                orphaned_ids.append(memory["id"])
+                continue
+            context["evidence_status"] = EVIDENCE_STATUS_STALE
+            context["stale_at"] = now
+            context["stale_reason"] = "analyzer_failed_on_current_snapshot"
+            if current_graph_signature:
+                context["stale_graph_content_signature"] = current_graph_signature
+            stale_ids.append(memory["id"])
+
         existing_links = {
             (item.get("from"), item.get("to"), item.get("type"))
             for item in store["associations"]
         }
         associations_created = 0
-        for from_id, to_id in zip(observed_ids, observed_ids[1:]):
+        for from_id, to_id in (
+            zip(observed_ids, observed_ids[1:]) if create_batch_links else []
+        ):
             key = (from_id, to_id, link_type)
             if from_id == to_id or key in existing_links:
                 continue
@@ -339,20 +538,50 @@ def upsert_memory_observations(
                 "type": link_type,
                 "strength": max(0.0, min(1.0, link_strength)),
                 "created_at": now,
-                "metadata": {"reason": "observation_batch_order"},
+                "metadata": {
+                    "reason": "observation_batch_order",
+                    "layer": "provenance",
+                },
             })
             existing_links.add(key)
             associations_created += 1
 
+        event = {
+            "type": "observation_batch",
+            "timestamp": now,
+            "namespaces": sorted(namespace_set),
+            "stale_namespaces": sorted(stale_namespace_set),
+            "graph_content_signature": current_graph_signature,
+            "observed_ids": list(observed_ids),
+            "stored_ids": list(stored_ids),
+            "reused_ids": list(reused_ids),
+            "revised_ids": list(revised_ids),
+            "resolved_ids": list(resolved_ids),
+            "orphaned_ids": list(orphaned_ids),
+            "stale_ids": list(stale_ids),
+            "provenance_not_semantic_edge": not create_batch_links,
+        }
+        store.setdefault("events", []).append(event)
+
         return {
-            "status": "observed",
+            "status": "reconciled",
             "stored_count": len(stored_ids),
             "reused_count": len(reused_ids),
             "updated_count": len(reused_ids),
+            "revised_count": len(revised_ids),
+            "resolved_count": len(resolved_ids),
+            "orphaned_count": len(orphaned_ids),
+            "stale_count": len(stale_ids),
             "stored_ids": stored_ids,
             "reused_ids": reused_ids,
+            "revised_ids": revised_ids,
+            "resolved_ids": resolved_ids,
+            "orphaned_ids": orphaned_ids,
+            "stale_ids": stale_ids,
             "observed_ids": observed_ids,
             "associations_created": associations_created,
+            "provenance_events_recorded": 1,
+            "batch_order_is_semantic_edge": create_batch_links,
             "input_observation_count": input_count,
             "unique_observation_count": len(unique_observations),
             "duplicate_input_count": input_count - len(unique_observations),
@@ -523,6 +752,7 @@ def recall_memories(
     min_importance: float = 0.0,
     limit: int = 20,
     include_archived: bool = False,
+    include_historical_evidence: bool = False,
 ) -> List[Dict[str, Any]]:
     """
     Recall memori berdasarkan filter.
@@ -536,6 +766,11 @@ def recall_memories(
     # Filter archived
     if not include_archived:
         results = [m for m in results if _get_status(m) == MEMORY_STATUS_ACTIVE]
+    if not include_historical_evidence:
+        results = [
+            memory for memory in results
+            if _get_evidence_status(memory) not in INACTIVE_EVIDENCE_STATUSES
+        ]
 
     if memory_type:
         results = [m for m in results if m.get("type") == memory_type]
@@ -647,6 +882,18 @@ def get_memory_stats() -> Dict[str, Any]:
 
     active_count = sum(1 for memory in memories if _get_status(memory) == MEMORY_STATUS_ACTIVE)
     archived_count = len(memories) - active_count
+    by_evidence_status: Dict[str, int] = {}
+    analyzer_evidence_count = 0
+    for memory in memories:
+        if memory.get("context", {}).get("dedup_key"):
+            analyzer_evidence_count += 1
+        status = _get_evidence_status(memory)
+        by_evidence_status[status] = by_evidence_status.get(status, 0) + 1
+    provenance_association_count = sum(
+        1 for association in associations
+        if association.get("metadata", {}).get("layer") == "provenance"
+        or association.get("metadata", {}).get("reason") == "observation_batch_order"
+    )
     return {
         "total_memories": len(memories),
         "active_memories": active_count,
@@ -654,6 +901,10 @@ def get_memory_stats() -> Dict[str, Any]:
         "total_associations": len(associations),
         "by_type": by_type,
         "by_association_type": by_assoc_type,
+        "analyzer_evidence_memories": analyzer_evidence_count,
+        "by_evidence_status": by_evidence_status,
+        "provenance_associations": provenance_association_count,
+        "semantic_associations": len(associations) - provenance_association_count,
         "schema_version": store.get("schema_version", "unknown"),
         "updated_at": store.get("updated_at", "unknown"),
         "runtime": memory_runtime_provenance(),
@@ -683,6 +934,7 @@ def consolidate_by_tag(
     candidates = [
         m for m in store["memories"]
         if m.get("type") == memory_type
+        and is_semantically_current_memory(m)
         and tag in m.get("tags", [])
         and (not only_unconsolidated or m.get("consolidated_into") is None)
     ]
@@ -754,6 +1006,8 @@ def consolidate_by_tag_auto(
     for m in store["memories"]:
         if m.get("type") != "episodic":
             continue
+        if not is_semantically_current_memory(m):
+            continue
         if m.get("consolidated_into") is not None:
             continue
         for tag in m.get("tags", []):
@@ -814,6 +1068,8 @@ def get_unconsolidated_by_tag() -> Dict[str, Any]:
 
     for m in store["memories"]:
         if m.get("type") != "episodic":
+            continue
+        if not is_semantically_current_memory(m):
             continue
         if m.get("consolidated_into") is not None:
             continue

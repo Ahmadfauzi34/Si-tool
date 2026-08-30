@@ -14,6 +14,7 @@ Usage:
 import os
 import sys
 import json
+import hashlib
 import datetime
 from typing import Any, Dict, List, Optional
 
@@ -23,14 +24,23 @@ if _SCRIPT_DIR not in sys.path:
     sys.path.insert(0, _SCRIPT_DIR)
 
 try:
-    from core.shared_graph import SOURCE_EXTENSIONS, build_shared_graph
+    from core.shared_graph import (
+        SOURCE_EXTENSIONS,
+        build_shared_graph,
+        graph_content_signature,
+    )
     SHARED_GRAPH_AVAILABLE = True
 except ImportError:
     try:
-        from shared_graph import SOURCE_EXTENSIONS, build_shared_graph
+        from shared_graph import (
+            SOURCE_EXTENSIONS,
+            build_shared_graph,
+            graph_content_signature,
+        )
         SHARED_GRAPH_AVAILABLE = True
     except ImportError:
         SOURCE_EXTENSIONS = (".ts", ".tsx", ".js", ".jsx")
+        graph_content_signature = None
         SHARED_GRAPH_AVAILABLE = False
 
 try:
@@ -590,12 +600,17 @@ def kernel_memory_recall(
 def kernel_memory_analyze(
     analyzer_names: Optional[List[str]] = None,
     output_mode: str = "full",
+    include_historical: bool = False,
+    include_provenance: bool = False,
 ) -> Dict[str, Any]:
     """Analisis topologi memori."""
     if not MEMORY_AVAILABLE:
         return {"error": "memory modules not available"}
 
-    memory_graph = build_memory_graph()
+    memory_graph = build_memory_graph(
+        include_historical=include_historical,
+        include_provenance=include_provenance,
+    )
     analyzer_output = run_memory_analyzers(memory_graph, analyzer_names)
 
     total_findings = sum(
@@ -617,9 +632,27 @@ def kernel_memory_analyze(
     )
     pressure = weighted_sum / max(1, total_memories)
     health_score = round(1.0 / (1.0 + pressure), 3)
+    health_model = {
+        "name": "severity_weighted_structural_pressure_v1",
+        "formula": "1 / (1 + weighted_finding_count / max(1, current_vertices))",
+        "weighted_finding_count": weighted_sum,
+        "structural_pressure": round(pressure, 6),
+        "not_correctness_or_truth_score": True,
+        "healthy_fragmentation_possible": True,
+        "bridge_requires_relation_witness": True,
+    }
     betti_breakdown = analyzer_output.get("results", {}).get(
         "mem.betti_breakdown", {}
     )
+    betti_data = betti_breakdown.get("betti_numbers", {})
+    betti_numbers = {
+        "beta_0": int(betti_data.get("beta_0", 0)),
+        "beta_1": int(betti_data.get("beta_1_total", 0)),
+        "beta_2": 0,
+    }
+    memory_archetype = analyzer_output.get("results", {}).get(
+        "mem.manifold", {}
+    ).get("summary", {}).get("memory_archetype", "unknown")
     circular_summary = analyzer_output.get("results", {}).get(
         "mem.circular", {}
     ).get("summary", {})
@@ -642,8 +675,11 @@ def kernel_memory_analyze(
             "mode": "memory_analyze",
             "topological_model": memory_graph.get("model", {}),
             "cycle_semantics": cycle_semantics,
+            "betti_numbers": betti_numbers,
+            "memory_archetype": memory_archetype,
             "memory_stats": memory_graph["summary"],
             "memory_health_score": health_score,
+            "memory_health_model": health_model,
             "findings_by_severity": severity_counts,
             "total_findings": total_findings,
             "analyzers_run": analyzer_output["analyzers_run"],
@@ -656,15 +692,21 @@ def kernel_memory_analyze(
         "mode": "memory_analyze",
         "topological_model": memory_graph.get("model", {}),
         "cycle_semantics": cycle_semantics,
+        "betti_numbers": betti_numbers,
+        "memory_archetype": memory_archetype,
         "memory_graph_summary": memory_graph["summary"],
         "analyzers": analyzer_output,
         "memory_health_score": health_score,
+        "memory_health_model": health_model,
         "unified_summary": {
             "total_memories": total_memories,
             "total_associations": memory_graph["summary"]["total_associations"],
             "total_findings": total_findings,
             "findings_by_severity": severity_counts,
             "memory_health_score": health_score,
+            "memory_health_model": health_model,
+            "betti_numbers": betti_numbers,
+            "memory_archetype": memory_archetype,
         },
     }
 
@@ -1206,18 +1248,38 @@ def kernel_xanalyze(
     store_result = {"stored_count": 0, "skipped": True}
     if auto_store and CROSS_DOMAIN_AVAILABLE:
         storeable = filter_findings_for_memory(analyzer_results, correlations)
-        if storeable:
-            store_result = auto_store_findings(
-                storeable,
-                scan_root,
-                evidence_signature=fingerprint.get("signature_hash"),
-            )
-        else:
-            store_result = {"stored_count": 0, "reason": "no storeable findings"}
+        full_graph_signature = graph.get("cache", {}).get(
+            "graph_content_signature"
+        )
+        if not full_graph_signature and graph_content_signature is not None:
+            full_graph_signature = graph_content_signature(graph)
+        file_content_hashes = {
+            path: f"sha256:{hashlib.sha256(content.encode('utf-8')).hexdigest()}"
+            for path, content in graph.get("file_map", {}).items()
+        }
+        store_result = auto_store_findings(
+            storeable,
+            scan_root,
+            evidence_signature=fingerprint.get("signature_hash"),
+            graph_content_signature=full_graph_signature,
+            active_files=graph.get("vertices", []),
+            file_content_hashes=file_content_hashes,
+            analyzers_observed=analyzer_output.get(
+                "analyzers_succeeded", analyzer_results.keys()
+            ),
+            analyzers_failed=analyzer_output.get("errors", {}).keys(),
+        )
 
     # Step 4: Check consolidation trigger
     consolidation_signal = {"trigger": False}
-    if CROSS_DOMAIN_AVAILABLE and store_result.get("stored_count", 0) > 0:
+    reconciled_activity = sum(
+        int(store_result.get(key, 0))
+        for key in (
+            "stored_count", "reused_count", "revised_count",
+            "resolved_count", "orphaned_count", "stale_count",
+        )
+    )
+    if CROSS_DOMAIN_AVAILABLE and reconciled_activity > 0:
         consolidation_signal = check_consolidation_trigger()
 
     # Step 5: Format output
@@ -1679,6 +1741,10 @@ def _memory_context_metadata(memory_context: Dict[str, Any]) -> Dict[str, Any]:
             {
                 "id": item.get("id"),
                 "type": item.get("type"),
+                "file": item.get("file"),
+                "evidence_status": item.get("evidence_status"),
+                "freshness": item.get("freshness"),
+                "source_content_sha256": item.get("source_content_sha256"),
                 "content_sha256": item.get("content_sha256"),
                 "content_truncated": item.get("content_truncated", False),
                 "retrieval_match": item.get("retrieval_match", {}),
@@ -1751,10 +1817,21 @@ def kernel_context(
     analyzer_output = _run_kernel_analyzers(graph)
     memory_context: Dict[str, Any] = {}
     if CROSS_DOMAIN_AVAILABLE:
+        current_graph_signature = graph.get("cache", {}).get(
+            "graph_content_signature"
+        )
+        if not current_graph_signature and graph_content_signature is not None:
+            current_graph_signature = graph_content_signature(graph)
+        current_file_hashes = {
+            path: f"sha256:{hashlib.sha256(content.encode('utf-8')).hexdigest()}"
+            for path, content in graph.get("file_map", {}).items()
+        }
         memory_context = get_memory_evidence(
             query=query,
             target_files=target_files,
             max_memories=5,
+            current_graph_signature=current_graph_signature,
+            current_file_hashes=current_file_hashes,
         )
     pack = build_context_pack(
         graph,
@@ -2152,7 +2229,7 @@ def main():
                 "steer": "python3 hott_kernel.py steer [root] [--output full|summary] [--baseline path]",
                 "memory_store": "python3 hott_kernel.py memory_store <type> <content> [--source src] [--importance 0.5] [--tags t1,t2]",
                 "memory_recall": "python3 hott_kernel.py memory_recall [query] [--type t] [--tags t1,t2] [--limit 20]",
-                "memory_analyze": "python3 hott_kernel.py memory_analyze [--analyzers a,b] [--output full|summary]",
+                "memory_analyze": "python3 hott_kernel.py memory_analyze [--analyzers a,b] [--output full|summary] [--include-historical] [--include-provenance]",
                 "memory_stats": "python3 hott_kernel.py memory_stats",
                 "memory_associate": "python3 hott_kernel.py memory_associate <from_id> <to_id> <type> [--strength 0.7]",
                 "memory_consolidate": "python3 hott_kernel.py memory_consolidate <id1,id2,...> --content '...' [--tags t1,t2]",
@@ -2448,12 +2525,19 @@ def main():
     elif mode == "memory_analyze":
         m_analyzers = None
         m_output = "full"
+        m_include_historical = "--include-historical" in sys.argv
+        m_include_provenance = "--include-provenance" in sys.argv
         for i, arg in enumerate(sys.argv):
             if arg == "--analyzers" and i + 1 < len(sys.argv):
                 m_analyzers = sys.argv[i + 1].split(",")
             elif arg == "--output" and i + 1 < len(sys.argv):
                 m_output = sys.argv[i + 1]
-        result = kernel_memory_analyze(m_analyzers, m_output)
+        result = kernel_memory_analyze(
+            m_analyzers,
+            m_output,
+            include_historical=m_include_historical,
+            include_provenance=m_include_provenance,
+        )
         _emit_cli_result(result)
 
     elif mode == "memory_stats":
@@ -2563,12 +2647,19 @@ def main():
         elif submode == "analyze":
             m_analyzers = None
             m_output = "full"
+            m_include_historical = "--include-historical" in sys.argv
+            m_include_provenance = "--include-provenance" in sys.argv
             for i, arg in enumerate(sys.argv):
                 if arg == "--analyzers" and i + 1 < len(sys.argv):
                     m_analyzers = sys.argv[i + 1].split(",")
                 elif arg == "--output" and i + 1 < len(sys.argv):
                     m_output = sys.argv[i + 1]
-            result = kernel_memory_analyze(m_analyzers, m_output)
+            result = kernel_memory_analyze(
+                m_analyzers,
+                m_output,
+                include_historical=m_include_historical,
+                include_provenance=m_include_provenance,
+            )
             _emit_cli_result(result)
         elif submode == "stats":
             result = kernel_memory_stats()

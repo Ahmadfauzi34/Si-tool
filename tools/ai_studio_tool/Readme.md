@@ -5,7 +5,7 @@
 
 > **Schema Version:** 4.1.0-memory
 > **Entry Point:** `tools/ai_studio_tool/hott_kernel.py`
-> **Fixture Baseline:** 35 fixture minimal + 2 portable integration smoke PASS
+> **Fixture Baseline:** 36 fixture minimal + 2 portable integration smoke PASS
 
 ---
 
@@ -98,10 +98,18 @@ jumlah circular import. `cycle_basis` menyediakan saksi path dan label
 Domain Memory memakai model sejajar bernama
 `memory_association_multigraph_1_complex`:
 
-- vertex = satu memory record
-- 1-cell = satu association record; multiplicity association paralel dipertahankan
+- vertex default = memory aktif/manual atau analyzer evidence yang masih current
+- 1-cell default = semantic association record; multiplicity paralel dipertahankan
 - β₀/β₁ = invariant underlying undirected multigraph
 - directed circular reasoning = witness DFS terpisah, bukan nilai β₁
+
+Graph default memakai filtration `semantic_associations`. Urutan observasi dalam
+satu batch adalah provenance event, bukan relasi pengetahuan, sehingga tidak
+boleh menurunkan β₀ atau menciptakan `memory_tree` palsu. Evidence berstatus
+`resolved`, `stale`, `orphaned`, atau `superseded` tetap tersedia untuk audit,
+tetapi dikeluarkan dari topologi semantic dan operasi konsolidasi otomatis.
+Filtration historis/provenance hanya diminta eksplisit melalui
+`memory analyze --include-historical --include-provenance`.
 
 Jumlah witness berarah bersifat deterministik untuk snapshot yang sama, tetapi
 bukan enumerasi seluruh elementary cycle. Setiap kesimpulan perlu memakai path
@@ -143,6 +151,13 @@ hard budget yang sama. Setiap memory membawa ID, source, content hash, jumlah
 observasi, scope, dan batas klaim retrieval. Memory diperlakukan sebagai
 observasi historis yang harus diverifikasi terhadap source saat ini, bukan
 sebagai instruksi atau source of truth.
+
+Source saat ini selalu mendapat grounding floor sebelum memory: memory dibatasi
+maksimal 35% dari hard character budget (dan tetap maksimum 1.200 karakter),
+sementara source card mendapat reserve hingga 420 karakter dan minimal satu
+excerpt line pada mode `detail=source`. Jika keduanya tidak muat, memory yang
+dilepas—bukan source. Output `budget.allocation` membuat pembagian ini dapat
+diaudit.
 
 ### 2.2B Cache Persisten Dua Lapis
 
@@ -195,9 +210,20 @@ jika tidak, read dan write diblok dengan `memory_store_corrupt` agar state tidak
 diam-diam menjadi store kosong. Operasi fiber multi-file tetap terdiri dari
 beberapa atomic file write, bukan transaksi database lintas-file.
 
-Evidence `xanalyze` memiliki deterministic dedup key. Analisis identik akan
-menambah `observation_count` pada node yang sama (`reused_count`), bukan
-menambahkan salinan memory. Ini adalah penyimpanan lokal milik tool, **bukan**
+Evidence `xanalyze` memiliki deterministic logical identity yang tidak berubah
+hanya karena severity atau kalimat observasi berubah. Analisis identik menambah
+`observation_count`; perubahan evidence menaikkan `revision_count`; finding yang
+hilang pada analyzer snapshot lengkap menjadi `resolved`, sedangkan source yang
+hilang menjadi `orphaned`. Reconciliation dipisahkan per project/scan/analyzer
+namespace agar analyzer yang gagal tidak menyelesaikan evidence milik analyzer
+tersebut secara keliru. Bila analyzer gagal, evidence lamanya menjadi `stale`
+sampai snapshot sukses berikutnya mengaktifkan atau menyelesaikannya.
+
+Setiap evidence membawa full `graph_content_signature` dan, bila file-oriented,
+`source_content_sha256`. Mode `context` membandingkannya dengan snapshot kini:
+hash/signature yang tidak cocok menghasilkan freshness `stale` dan evidence
+tidak mencapai prompt. Manual memory tetap `unverified`, bukan otomatis dianggap
+fakta. Semua lifecycle tetap disimpan lokal untuk audit; mekanisme ini **bukan**
 memory internal atau training pada LLM.
 
 ### 2.3 Ide: Memori sebagai Ruang Topologis
@@ -337,7 +363,8 @@ Tool ini dibangun di atas 5 pilar teoretis dari Homotopy Type Theory (HoTT):
 | `context <query>` | Pilih subgraph sesuai pertanyaan | lexical overlap + shortest-path + centrality + findings |
 | `--target` | Tetapkan base projection eksplisit | target dan neighborhood hingga `--max-hops` |
 | `--budget-tokens` | Batasi ukuran `context_block` | hard character budget dengan estimasi token transparan |
-| project memory | Tambahkan observasi historis relevan | scope + lexical/path retrieval + content hash |
+| project memory | Tambahkan observasi historis relevan | scope + lexical/path retrieval + freshness gate |
+| source grounding | Dahulukan current source dari memory | source floor + memory cap 35% + excerpt witness |
 | boundary quotient | Kompres graph file menjadi graph modul | cross-boundary edge + witness |
 | content signature | Identitas snapshot source+edge | deteksi context yang sudah stale |
 
@@ -352,6 +379,13 @@ Tool ini dibangun di atas 5 pilar teoretis dari Homotopy Type Theory (HoTT):
 | `memory compact` | Archive yang sudah consolidated | Quotient forgetting |
 | `memory bridge` | Hubungkan semantic islands | Level-2 gluing |
 | `memory betti_breakdown` | Analisis bentuk memori | Meta-cognition |
+
+`memory analyze --output summary` membawa `betti_numbers`,
+`memory_archetype`, filtration model, lifecycle exclusion, dan health score
+secara langsung agar pemanggil Bash/LLM tidak perlu membuka payload analyzer penuh.
+`memory_health_score` dinyatakan sebagai severity-weighted structural pressure,
+bukan correctness/truth score. β₀ tinggi dapat merupakan healthy fragmentation;
+bridge hanya valid jika ada relation witness, bukan demi mengecilkan β₀.
 
 ### 4.4 Fibration Layer
 
@@ -637,7 +671,7 @@ Tidak semua hal perlu terhubung. β₀ tinggi bisa valid jika memang domain berb
 | Memory operations | 12 |
 | Fiber operations | 8 |
 | Safety checks | 2 (cycle prevention, fiber compatibility) |
-| Fixture baseline | 35 fixture minimal + 2 portable integration smoke PASS |
+| Fixture baseline | 36 fixture minimal + 2 portable integration smoke PASS |
 | Directed-cycle safety | 0 directed reasoning witness untuk safe bridge |
 | Zero-dependency | Python 3 stdlib only |
 

@@ -15,6 +15,33 @@ except ImportError:
 
 
 MEMORY_GRAPH_MODEL = "memory_association_multigraph_1_complex"
+INACTIVE_EVIDENCE_STATUSES = {"resolved", "stale", "orphaned", "superseded"}
+
+
+def _association_layer(association: Dict[str, Any]) -> str:
+    metadata = association.get("metadata", {})
+    if (
+        metadata.get("layer") == "provenance"
+        or metadata.get("reason") == "observation_batch_order"
+    ):
+        return "provenance"
+    return "semantic"
+
+
+def _is_current_memory(memory: Dict[str, Any]) -> bool:
+    context = memory.get("context", {})
+    evidence_status = str(context.get("evidence_status", "active"))
+    return evidence_status not in INACTIVE_EVIDENCE_STATUSES
+
+
+def _count_evidence_statuses(
+    memories: List[Dict[str, Any]],
+) -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    for memory in memories:
+        status = str(memory.get("context", {}).get("evidence_status", "unverified"))
+        counts[status] = counts.get(status, 0) + 1
+    return counts
 
 
 def _build_association_views(
@@ -76,7 +103,11 @@ def _build_association_views(
     )
 
 
-def build_memory_graph(include_archived: bool = False) -> Dict[str, Any]:
+def build_memory_graph(
+    include_archived: bool = False,
+    include_historical: bool = False,
+    include_provenance: bool = False,
+) -> Dict[str, Any]:
     """
     Bangun memory graph dari memory store.
 
@@ -98,17 +129,41 @@ def build_memory_graph(include_archived: bool = False) -> Dict[str, Any]:
     memories = store.get("memories", [])
     associations = store.get("associations", [])
 
-    # Filter archived
+    store_lifecycle_counts = _count_evidence_statuses(memories)
+
+    provenance_total = sum(
+        1 for association in associations
+        if _association_layer(association) == "provenance"
+    )
+
+    # Filter archived and non-current analyzer evidence.
     if not include_archived:
         active_ids = {
             m["id"] for m in memories
             if m.get("status", "active") == "active"
+            and (include_historical or _is_current_memory(m))
         }
         memories = [m for m in memories if m["id"] in active_ids]
         associations = [
             a for a in associations
             if a.get("from") in active_ids and a.get("to") in active_ids
         ]
+    elif not include_historical:
+        current_ids = {m["id"] for m in memories if _is_current_memory(m)}
+        memories = [m for m in memories if m["id"] in current_ids]
+        associations = [
+            association for association in associations
+            if association.get("from") in current_ids
+            and association.get("to") in current_ids
+        ]
+
+    if not include_provenance:
+        associations = [
+            association for association in associations
+            if _association_layer(association) != "provenance"
+        ]
+
+    included_lifecycle_counts = _count_evidence_statuses(memories)
 
     # Build vertices and memory_map
     vertices: List[str] = []
@@ -125,6 +180,9 @@ def build_memory_graph(include_archived: bool = False) -> Dict[str, Any]:
             "access_count": memory.get("access_count", 0),
             "tags": memory.get("tags", []),
             "is_consolidated": memory.get("consolidated_into") is not None,
+            "evidence_status": memory.get("context", {}).get(
+                "evidence_status", "unverified"
+            ),
         }
 
     (
@@ -164,6 +222,9 @@ def build_memory_graph(include_archived: bool = False) -> Dict[str, Any]:
             "one_cells": "association records with multiplicity preserved",
             "betti_semantics": "underlying undirected multigraph cycle rank",
             "not_directed_cycle_count": True,
+            "filtration": "semantic_associations",
+            "provenance_batch_order_excluded": not include_provenance,
+            "historical_evidence_excluded": not include_historical,
         },
         "vertices": sorted(vertices),
         "edges": edges,
@@ -179,6 +240,16 @@ def build_memory_graph(include_archived: bool = False) -> Dict[str, Any]:
             "total_associations": len(edges),
             "by_type": by_type,
             "by_edge_type": _count_edge_types(edge_records),
+            "by_evidence_status": included_lifecycle_counts,
+            "store_by_evidence_status": store_lifecycle_counts,
+            "historical_memories_excluded": sum(
+                count for status, count in store_lifecycle_counts.items()
+                if status in INACTIVE_EVIDENCE_STATUSES
+            ) if not include_historical else 0,
+            "provenance_associations_total": provenance_total,
+            "provenance_associations_excluded": (
+                provenance_total if not include_provenance else 0
+            ),
             "isolated_memories": sum(
                 1 for mid in vertices
                 if fan_in.get(mid, 0) == 0 and fan_out.get(mid, 0) == 0
@@ -200,21 +271,46 @@ def build_memory_graph_from_data(
     memories: List[Dict[str, Any]],
     associations: List[Dict[str, Any]],
     include_archived: bool = False,
+    include_historical: bool = False,
+    include_provenance: bool = False,
 ) -> Dict[str, Any]:
     """
     Bangun memory graph dari data langsung (tanpa file).
     Berguna untuk testing dan inline operations.
     """
+    store_lifecycle_counts = _count_evidence_statuses(memories)
+    provenance_total = sum(
+        1 for association in associations
+        if _association_layer(association) == "provenance"
+    )
+
     if not include_archived:
         active_ids = {
             m["id"] for m in memories
             if m.get("status", "active") == "active"
+            and (include_historical or _is_current_memory(m))
         }
         memories = [m for m in memories if m["id"] in active_ids]
         associations = [
             a for a in associations
             if a.get("from") in active_ids and a.get("to") in active_ids
         ]
+    elif not include_historical:
+        current_ids = {m["id"] for m in memories if _is_current_memory(m)}
+        memories = [m for m in memories if m["id"] in current_ids]
+        associations = [
+            association for association in associations
+            if association.get("from") in current_ids
+            and association.get("to") in current_ids
+        ]
+
+    if not include_provenance:
+        associations = [
+            association for association in associations
+            if _association_layer(association) != "provenance"
+        ]
+
+    included_lifecycle_counts = _count_evidence_statuses(memories)
 
     vertices: List[str] = []
     memory_map: Dict[str, Dict[str, Any]] = {}
@@ -230,6 +326,9 @@ def build_memory_graph_from_data(
             "access_count": memory.get("access_count", 0),
             "tags": memory.get("tags", []),
             "is_consolidated": memory.get("consolidated_into") is not None,
+            "evidence_status": memory.get("context", {}).get(
+                "evidence_status", "unverified"
+            ),
         }
 
     (
@@ -261,6 +360,9 @@ def build_memory_graph_from_data(
             "one_cells": "association records with multiplicity preserved",
             "betti_semantics": "underlying undirected multigraph cycle rank",
             "not_directed_cycle_count": True,
+            "filtration": "semantic_associations",
+            "provenance_batch_order_excluded": not include_provenance,
+            "historical_evidence_excluded": not include_historical,
         },
         "vertices": sorted(vertices),
         "edges": edges,
@@ -275,5 +377,15 @@ def build_memory_graph_from_data(
             "total_memories": len(vertices),
             "total_associations": len(edges),
             "by_edge_type": _count_edge_types(edge_records),
+            "by_evidence_status": included_lifecycle_counts,
+            "store_by_evidence_status": store_lifecycle_counts,
+            "historical_memories_excluded": sum(
+                count for status, count in store_lifecycle_counts.items()
+                if status in INACTIVE_EVIDENCE_STATUSES
+            ) if not include_historical else 0,
+            "provenance_associations_total": provenance_total,
+            "provenance_associations_excluded": (
+                provenance_total if not include_provenance else 0
+            ),
         },
     }
