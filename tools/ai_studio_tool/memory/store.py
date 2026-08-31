@@ -8,10 +8,9 @@ Supports episodic, semantic, and procedural memory types.
 
 import copy
 import os
-import re
 import uuid
 import datetime
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional
 
 from memory.runtime import (
     get_memory_runtime_paths,
@@ -27,6 +26,11 @@ from memory.provenance import (
     normalize_observation_event,
     provenance_retention_snapshot,
     validate_provenance_event_limit,
+)
+from memory.retrieval import (
+    build_recall_projection,
+    rank_recall_projection,
+    recall_from_projection,
 )
 
 SCHEMA_VERSION = "4.1.0-memory"
@@ -820,77 +824,46 @@ def recall_memories(
     Ini adalah operasi READ — tidak mengubah access_count.
     Untuk access tracking, gunakan access_memory().
     """
+    projection = build_memory_recall_projection()
+    return recall_from_projection(
+        projection,
+        query=query,
+        memory_type=memory_type,
+        tags=tags,
+        min_importance=min_importance,
+        limit=limit,
+        include_archived=include_archived,
+        include_historical_evidence=include_historical_evidence,
+    )
+
+
+def build_memory_recall_projection() -> Dict[str, Any]:
+    """Load one canonical snapshot and build its deterministic recall projection."""
     store = load_store()
-    results = [copy.deepcopy(memory) for memory in store["memories"]]
+    return build_recall_projection(store.get("memories", []))
 
-    # Filter archived
-    if not include_archived:
-        results = [m for m in results if _get_status(m) == MEMORY_STATUS_ACTIVE]
-    if not include_historical_evidence:
-        results = [
-            memory for memory in results
-            if _get_evidence_status(memory) not in INACTIVE_EVIDENCE_STATUSES
-        ]
 
-    if memory_type:
-        results = [m for m in results if m.get("type") == memory_type]
-
-    if tags:
-        results = [m for m in results if any(t in m.get("tags", []) for t in tags)]
-
-    if min_importance > 0:
-        results = [m for m in results if m.get("importance", 0) >= min_importance]
-
-    scored: List[Tuple[float, Dict[str, Any]]] = []
-    if query:
-        normalized_query = " ".join(query.lower().split())
-        query_terms = {
-            token for token in re.findall(r"[a-z0-9]+", normalized_query)
-            if len(token) >= 2
-        }
-        for memory in results:
-            context = memory.get("context", {})
-            searchable = " ".join([
-                str(memory.get("content", "")),
-                str(memory.get("source", "")),
-                " ".join(str(tag) for tag in memory.get("tags", [])),
-                str(context.get("file", "")),
-                str(context.get("finding_type", "")),
-                str(context.get("source_analyzer", "")),
-            ]).lower()
-            searchable_normalized = " ".join(searchable.split())
-            searchable_terms = set(re.findall(r"[a-z0-9]+", searchable_normalized))
-            matched_terms = query_terms & searchable_terms
-            exact = normalized_query in searchable_normalized
-            if not exact and query_terms and not matched_terms:
-                continue
-            if not exact and not query_terms:
-                continue
-            overlap = len(matched_terms) / max(1, len(query_terms))
-            score = (4.0 if exact else 0.0) + 2.0 * overlap + float(memory.get("importance", 0.0))
-            memory["retrieval_match"] = {
-                "model": "lexical_overlap_v1",
-                "score": round(score, 6),
-                "exact_substring": exact,
-                "matched_terms": sorted(matched_terms),
-                "query_term_count": len(query_terms),
-            }
-            scored.append((score, memory))
-        scored.sort(
-            key=lambda item: (
-                -item[0],
-                -float(item[1].get("importance", 0.0)),
-                str(item[1].get("timestamp", "")),
-                str(item[1].get("id", "")),
-            )
-        )
-        results = [memory for _, memory in scored]
-    else:
-        # Stable two-pass sort gives importance desc, then timestamp desc.
-        results.sort(key=lambda memory: str(memory.get("timestamp", "")), reverse=True)
-        results.sort(key=lambda memory: float(memory.get("importance", 0.0)), reverse=True)
-
-    return results[:limit]
+def rank_memory_recall_projection(
+    projection: Dict[str, Any],
+    query: Optional[str] = None,
+    target_files: Optional[List[str]] = None,
+    memory_type: Optional[str] = None,
+    tags: Optional[List[str]] = None,
+    min_importance: float = 0.0,
+    include_archived: bool = False,
+    include_historical_evidence: bool = False,
+) -> Dict[str, Any]:
+    """Expose multi-signal ranking over an already loaded memory snapshot."""
+    return rank_recall_projection(
+        projection,
+        query=query,
+        target_files=target_files,
+        memory_type=memory_type,
+        tags=tags,
+        min_importance=min_importance,
+        include_archived=include_archived,
+        include_historical_evidence=include_historical_evidence,
+    )
 
 
 def access_memory(memory_id: str) -> Optional[Dict[str, Any]]:
