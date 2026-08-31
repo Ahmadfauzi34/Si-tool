@@ -299,7 +299,12 @@ diabaikan untuk β₀/β₁, sehingga β₁ **bukan** jumlah circular import.
 | `optimizer_additional_filesystem_scans=0` | Analyzer dan optimizer memakai snapshot sama | Hindari scan/read source berulang yang tidak diperlukan |
 | `memory_context.selected_count` | Memory evidence yang benar-benar masuk budget | Perlakukan sebagai observasi dan verifikasi ke source |
 | `memory_scope.scope_id` | Identitas project scope runtime | Pastikan tidak berubah/tercampur antar proyek |
-| `memory_retrieval.claim_boundary` | Retrieval lexical/path + snapshot freshness gate, bukan embedding proof | Jangan klaim semantic match yang tidak dihitung |
+| `memory_retrieval.claim_boundary` | Projection lexical/path exact untuk predicate terdeklarasi, bukan semantic relevance proof | Jangan klaim semantic match yang tidak dihitung |
+| `memory_retrieval.projection.source_store_loads` | `1` untuk gabungan query + seluruh explicit target | Pastikan satu request tidak membaca canonical store berulang kali |
+| `memory_retrieval.projection.snapshot_consistent` | Semua candidate berasal dari snapshot/signature yang sama | Gunakan signature sebagai provenance selection |
+| `memory_retrieval.projection.candidate_count` | Ukuran subspace yang benar-benar dirangking | Bandingkan dengan `snapshot_memory_count`, bukan total token prompt |
+| `memory_retrieval.projection.target_witness_satisfied` | Minimal satu exact/path target memory menutup slot saat diwajibkan | Audit explicit-target coverage tanpa mengalahkan query utama |
+| `memory_retrieval.projection.omitted_semantic_relevance_proven=false` | Omission hanya di luar predicate reference machine | Jangan menyatakan record teromit pasti tidak relevan |
 | `budget.allocation.source_grounding_satisfied` | Current source excerpt masuk pada mode source | Harus `true` sebelum memakai memory evidence |
 | `budget.allocation.memory_max_fraction` | Cap memory terhadap hard budget | Nilai default `0.35`; source harus didahulukan |
 | `budget.allocation.current_source_precedes_memory` | Urutan prompt saat memory disertakan | Pastikan source card muncul lebih dahulu |
@@ -593,6 +598,8 @@ tools/ai_studio_tool/
 ├── memory/                          # Topological Memory Domain (Layer 2)
 │   ├── store.py                     # CRUD, associations, retrieval
 │   ├── runtime.py                   # Project scope, lock, atomic JSON, recovery
+│   ├── retrieval.py                 # Single-snapshot inverted recall projection
+│   ├── provenance.py                # Bounded observation journal + checkpoint
 │   ├── graph.py                     # Memory graph & adjacency builder
 │   ├── analyzers.py                 # Memory fragmentation, hub, manifold, Betti
 │   ├── betti.py                     # Edge-type-aware Betti breakdown

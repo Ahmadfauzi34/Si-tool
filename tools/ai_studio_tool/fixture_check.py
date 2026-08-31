@@ -2829,8 +2829,8 @@ def test_f38_memory_augmented_context_budget():
         expect(
             result.get("provenance", {}).get("memory_retrieval", {}).get("claim_boundary")
             == (
-                "deterministic lexical-and-path retrieval with snapshot freshness gating; "
-                "not semantic embedding proof"
+                "deterministic lexical/path projection over one canonical snapshot with "
+                "freshness gating; exact for declared predicates, not semantic relevance proof"
             ),
             f"{name}: batas klaim retrieval harus eksplisit",
         )
@@ -3385,6 +3385,144 @@ def test_f40_bounded_provenance_retention():
             reset_memory_runtime_configuration()
 
 
+def test_f41_snapshot_consistent_memory_recall_projection():
+    """One store snapshot drives bounded multi-signal recall without deleting memory."""
+    name = "F41"
+    import memory.store as memory_store
+    from bridge.xcontext import get_memory_evidence
+    from memory.retrieval import rank_recall_projection
+    from memory.runtime import (
+        configure_memory_runtime,
+        reset_memory_runtime_configuration,
+    )
+
+    with tempfile.TemporaryDirectory(prefix="ai-studio-memory-projection-") as tmp:
+        root = Path(tmp)
+        state_dir = root / "state"
+        project = root / "project"
+        project.mkdir(parents=True)
+        target_file = "src/critical/target.service.ts"
+        configure_memory_runtime(
+            project_root=str(project),
+            state_dir=str(state_dir),
+        )
+        original_load_store = memory_store.load_store
+        try:
+            store = memory_store._default_store()
+            for index in range(256):
+                store["memories"].append(memory_store._new_memory_record(
+                    "episodic",
+                    f"common query hazard in unrelated service {index}",
+                    "f41-query",
+                    1.0,
+                    ["unrelated"],
+                    {"file": f"src/unrelated/service_{index}.ts"},
+                ))
+            target_memory = memory_store._new_memory_record(
+                "semantic",
+                "Target-local invariant that does not repeat the developer query.",
+                "f41-target",
+                0.1,
+                ["src.critical"],
+                {"file": target_file},
+            )
+            rare_memory = memory_store._new_memory_record(
+                "episodic",
+                "nondeterministic chrono nonce witness",
+                "f41-rare",
+                0.8,
+                ["rare"],
+                {"file": "src/rare/nonce.ts"},
+            )
+            store["memories"].extend([target_memory, rare_memory])
+            memory_store.save_store(store)
+
+            first_projection = memory_store.build_memory_recall_projection()
+            second_projection = memory_store.build_memory_recall_projection()
+            expect(
+                first_projection.get("snapshot_signature")
+                == second_projection.get("snapshot_signature")
+                and first_projection.get("snapshot_memory_count") == 258,
+                f"{name}: projection snapshot harus deterministik dan complete",
+            )
+
+            rare_rank = rank_recall_projection(
+                first_projection,
+                query="nondeterministic chrono nonce",
+            )
+            rare_trace = rare_rank.get("trace", {})
+            expect(
+                rare_trace.get("candidate_count") == 1
+                and rare_trace.get("projection_pruned_count") == 257
+                and rare_trace.get("predicate_completeness")
+                == "exact_for_declared_lexical_and_path_predicates",
+                f"{name}: inverted projection harus punya candidate proof terukur",
+            )
+            expect(
+                rare_trace.get("omitted_semantic_relevance_proven") is False,
+                f"{name}: projection tidak boleh mengklaim omitted memory irrelevant",
+            )
+
+            load_calls = 0
+
+            def counted_load_store():
+                nonlocal load_calls
+                load_calls += 1
+                return original_load_store()
+
+            memory_store.load_store = counted_load_store
+            evidence = get_memory_evidence(
+                query="common query hazard",
+                target_files=[target_file],
+                max_memories=2,
+            )
+            selected = evidence.get("memories", [])
+            selected_ids = {memory.get("id") for memory in selected}
+            trace = evidence.get("retrieval", {}).get("projection", {})
+            expect(
+                load_calls == 1 and trace.get("source_store_loads") == 1,
+                f"{name}: query+target harus memakai tepat satu canonical snapshot",
+            )
+            expect(
+                len(selected) == 2
+                and target_memory["id"] in selected_ids
+                and any(memory.get("source") == "f41-query" for memory in selected),
+                f"{name}: bounded selection harus menutup query dan explicit target",
+            )
+            expect(
+                trace.get("target_witness_required") is True
+                and trace.get("target_witness_satisfied") is True,
+                f"{name}: target-slot coverage harus punya witness eksplisit",
+            )
+            target_view = next(
+                memory for memory in selected
+                if memory.get("id") == target_memory["id"]
+            )
+            expect(
+                "target_file_exact"
+                in target_view.get("retrieval_match", {}).get(
+                    "selection_signals", []
+                ),
+                f"{name}: target memory harus membawa alasan selection",
+            )
+
+            memory_store.load_store = original_load_store
+            compatibility = memory_store.recall_memories(
+                query="nondeterministic chrono nonce",
+                limit=2,
+            )
+            expect(
+                [memory.get("id") for memory in compatibility]
+                == [rare_memory["id"]]
+                and compatibility[0].get("retrieval_match", {}).get("model")
+                == "lexical_overlap_v1",
+                f"{name}: public recall contract harus backward-compatible",
+            )
+        finally:
+            memory_store.load_store = original_load_store
+            reset_memory_runtime_configuration()
+
+
 def _run_kernel(*args):
     env = dict(os.environ)
     env["PYTHONDONTWRITEBYTECODE"] = "1"
@@ -3721,6 +3859,7 @@ def main():
         test_f38_memory_augmented_context_budget,
         test_f39_memory_semantic_integrity,
         test_f40_bounded_provenance_retention,
+        test_f41_snapshot_consistent_memory_recall_projection,
         test_kernel_wiring_smoke,
         test_kernel_cli_contract,
     ]
@@ -3737,7 +3876,7 @@ def main():
             print(f"- {failure}")
         sys.exit(1)
 
-    print("PASS: 37 fixture minimal + 2 portable integration smoke aman")
+    print("PASS: 38 fixture minimal + 2 portable integration smoke aman")
 
 
 if __name__ == "__main__":

@@ -329,9 +329,30 @@ def test_angular_context_optimizer():
         cache_context.get("provenance", {}).get("optimizer_additional_filesystem_scans") == 0,
         "DEMO: optimizer harus reuse SharedGraph tanpa scan tambahan",
     )
+    memory_retrieval = cache_context.get("memory_context", {}).get("retrieval", {})
+    memory_projection = memory_retrieval.get("projection", {})
+    expect(
+        memory_retrieval.get("model")
+        == "scoped_memory_recall_projection_v3_freshness"
+        and memory_projection.get("source_store_loads") == 1
+        and memory_projection.get("snapshot_consistent") is True,
+        "DEMO: context memory harus memakai satu snapshot recall projection",
+    )
+    expect(
+        memory_projection.get("omitted_semantic_relevance_proven") is False
+        and str(memory_projection.get("snapshot_signature", "")).startswith("sha256:"),
+        "DEMO: recall projection harus membawa signature dan batas omission",
+    )
     expect(
         cache_context.get("context_block") == repeated.get("context_block"),
         "DEMO: context block untuk snapshot dan query yang sama harus deterministik",
+    )
+    expect(
+        memory_projection.get("snapshot_signature")
+        == repeated.get("memory_context", {}).get("retrieval", {}).get(
+            "projection", {}
+        ).get("snapshot_signature"),
+        "DEMO: memory projection signature harus stabil pada snapshot identik",
     )
     expect(
         cache_context.get("provenance", {}).get("graph_content_signature")

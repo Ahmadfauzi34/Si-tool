@@ -5,7 +5,7 @@
 
 > **Schema Version:** 4.1.0-memory
 > **Entry Point:** `tools/ai_studio_tool/hott_kernel.py`
-> **Fixture Baseline:** 37 fixture minimal + 2 portable integration smoke PASS
+> **Fixture Baseline:** 38 fixture minimal + 2 portable integration smoke PASS
 
 ---
 
@@ -151,6 +151,15 @@ hard budget yang sama. Setiap memory membawa ID, source, content hash, jumlah
 observasi, scope, dan batas klaim retrieval. Memory diperlakukan sebagai
 observasi historis yang harus diverifikasi terhadap source saat ini, bukan
 sebagai instruksi atau source of truth.
+
+Recall menuju context memakai `memory-recall-projection-v1`: satu canonical
+store snapshot dimuat satu kali, lalu field retrieval dipetakan ke inverted
+term/tag/type/path projection. Query dan explicit target dirangking bersama;
+jika tersedia sedikitnya dua slot, satu slot menjadi target witness tanpa
+menggusur bukti query utama. Hanya record yang mencapai kandidat akhir yang
+dibentuk menjadi context view. Canonical memory tidak dipangkas oleh projection
+ini, dan `omitted_semantic_relevance_proven=false` melarang LLM menyimpulkan
+bahwa memory di luar predicate pasti tidak relevan secara semantik.
 
 Source saat ini selalu mendapat grounding floor sebelum memory: memory dibatasi
 maksimal 35% dari hard character budget (dan tetap maksimum 1.200 karakter),
@@ -379,7 +388,7 @@ Tool ini dibangun di atas 5 pilar teoretis dari Homotopy Type Theory (HoTT):
 | `context <query>` | Pilih subgraph sesuai pertanyaan | lexical overlap + shortest-path + centrality + findings |
 | `--target` | Tetapkan base projection eksplisit | target dan neighborhood hingga `--max-hops` |
 | `--budget-tokens` | Batasi ukuran `context_block` | hard character budget dengan estimasi token transparan |
-| project memory | Tambahkan observasi historis relevan | scope + lexical/path retrieval + freshness gate |
+| project memory | Tambahkan observasi historis relevan | single-snapshot lexical/path projection + freshness gate |
 | source grounding | Dahulukan current source dari memory | source floor + memory cap 35% + excerpt witness |
 | boundary quotient | Kompres graph file menjadi graph modul | cross-boundary edge + witness |
 | content signature | Identitas snapshot source+edge | deteksi context yang sudah stale |
@@ -618,6 +627,8 @@ tools/ai_studio_tool/
 │
 ├── memory/                          # Topological Memory Domain (Layer 2)
 │   ├── store.py                     # CRUD, associations, retrieval
+│   ├── runtime.py                   # Project scope, lock, atomic JSON, recovery
+│   ├── retrieval.py                 # Single-snapshot inverted recall projection
 │   ├── provenance.py                # Bounded observation journal + checkpoint
 │   ├── graph.py                     # Memory graph & adjacency builder
 │   ├── analyzers.py                 # Memory fragmentation, hub, manifold, Betti
@@ -688,7 +699,7 @@ Tidak semua hal perlu terhubung. β₀ tinggi bisa valid jika memang domain berb
 | Memory operations | 12 |
 | Fiber operations | 8 |
 | Safety checks | 2 (cycle prevention, fiber compatibility) |
-| Fixture baseline | 37 fixture minimal + 2 portable integration smoke PASS |
+| Fixture baseline | 38 fixture minimal + 2 portable integration smoke PASS |
 | Directed-cycle safety | 0 directed reasoning witness untuk safe bridge |
 | Zero-dependency | Python 3 stdlib only |
 
