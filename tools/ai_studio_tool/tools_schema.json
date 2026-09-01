@@ -1,7 +1,7 @@
 [
   {
     "name": "hott_kernel",
-    "description": "Unified HoTT Kernel: single entry point untuk seluruh analisis codebase dan memory store. Menjalankan 13 codebase analyzer (topo, perf, hott) dan 6 memory analyzer. Persistent SharedGraph cache memakai invalidasi file-level; persistent analyzer-evidence cache memakai exact semantic-graph + engine signature. Project-scoped memory memakai locking, atomic JSON, backup recovery, logical finding reconciliation, evidence lifecycle, semantic/provenance filtration, bounded observation provenance, dan single-snapshot inverted recall projection. Mode 'context' membuat query-directed context pack dengan graph evidence, freshness-gated scoped memory, quotient boundary, provenance, source-grounding floor, memory cap 35%, dan hard budget. Mode 'cache' menginspeksi, me-refresh, atau membersihkan kedua lapis cache. Mode 'analyze' untuk findings, 'synthesize' untuk fingerprint + health score + correlations, 'steer' untuk drift detection + steering signals, 'establish' untuk baseline, 'impact'/'outline'/'brief' untuk targeted file analysis, 'memory_*' untuk memory domain, 'xanalyze'/'xsteer'/'xcontext' untuk cross-domain intelligence.",
+    "description": "Unified HoTT Kernel: single entry point untuk seluruh analisis codebase dan memory store. Menjalankan 13 codebase analyzer (topo, perf, hott) dan 6 memory analyzer. Tiga cache derived persisten mencakup SharedGraph dengan invalidasi file-level, analyzer evidence dengan exact semantic-graph + engine signature, dan memory recall projection dengan exact canonical-store SHA + incremental per-record reuse. Project-scoped memory memakai locking, atomic JSON, backup recovery, logical finding reconciliation, evidence lifecycle, semantic/provenance filtration, bounded observation provenance, dan single-snapshot inverted recall projection. Mode 'context' membuat query-directed context pack dengan graph evidence, freshness-gated scoped memory, quotient boundary, provenance, source-grounding floor, memory cap 35%, dan hard budget. Mode 'cache' menginspeksi, me-refresh, atau membersihkan ketiga cache derived tanpa menghapus canonical memory. Mode 'analyze' untuk findings, 'synthesize' untuk fingerprint + health score + correlations, 'steer' untuk drift detection + steering signals, 'establish' untuk baseline, 'impact'/'outline'/'brief' untuk targeted file analysis, 'memory_*' untuk memory domain, 'xanalyze'/'xsteer'/'xcontext' untuk cross-domain intelligence.",
     "parameters": {
       "type": "OBJECT",
       "properties": {
@@ -39,11 +39,11 @@
         },
         "cache_action": {
           "type": "STRING",
-          "description": "Mode cache: status | refresh | clear. Status mengaudit snapshot source dan analyzer evidence; refresh membaca ulang source dan menjalankan ulang analyzer; clear menghapus kedua entry untuk root terkait."
+          "description": "Mode cache: status | refresh | clear. Mengelola snapshot source, analyzer evidence, dan scoped memory recall projection. Clear hanya menghapus cache derived, bukan canonical memory."
         },
         "cache_mode": {
           "type": "STRING",
-          "description": "Kebijakan dua lapis cache untuk mode codebase: auto | refresh | off. Default auto. Snapshot berisi salinan source; analyzer cache berisi evidence turunan. Keduanya disimpan lokal di data/codebase/cache milik tool."
+          "description": "Kebijakan cache derived: auto | refresh | off. Default auto. Pada mode context berlaku untuk ketiga lapis; pada memory recall berlaku untuk scoped recall projection. Cache source/memory dapat memuat content penuh; semuanya lokal, Git-ignored, dan bukan source of truth."
         },
         "memory_project_root": {
           "type": "STRING",

@@ -73,6 +73,23 @@ def _append_index(index: Dict[str, List[int]], key: str, ordinal: int) -> None:
         index.setdefault(key, []).append(ordinal)
 
 
+def _build_recall_entry(memory: Dict[str, Any], ordinal: int) -> Dict[str, Any]:
+    context = memory.get("context", {})
+    searchable = _searchable_text(memory)
+    file_path = _normalize_path(context.get("file", ""))
+    return {
+        "ordinal": ordinal,
+        "memory": memory,
+        "searchable": searchable,
+        "terms": _terms(searchable),
+        "tags": {str(tag) for tag in memory.get("tags", [])},
+        "file": file_path,
+        "basename": os.path.basename(file_path),
+        "status": _memory_status(memory),
+        "evidence_status": _evidence_status(memory),
+    }
+
+
 def _projection_signature(entries: List[Dict[str, Any]]) -> str:
     digest = hashlib.sha256()
     for entry in entries:
@@ -97,41 +114,26 @@ def _projection_signature(entries: List[Dict[str, Any]]) -> str:
     return f"sha256:{digest.hexdigest()}"
 
 
-def build_recall_projection(memories: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
-    """Build an inverted projection from one canonical memory-store snapshot."""
-    entries: List[Dict[str, Any]] = []
+def _assemble_recall_projection(
+    entries: List[Dict[str, Any]],
+    build_stats: Dict[str, int],
+) -> Dict[str, Any]:
     term_index: Dict[str, List[int]] = {}
     tag_index: Dict[str, List[int]] = {}
     type_index: Dict[str, List[int]] = {}
     file_index: Dict[str, List[int]] = {}
     basename_index: Dict[str, List[int]] = {}
 
-    for ordinal, memory in enumerate(memories):
-        context = memory.get("context", {})
-        searchable = _searchable_text(memory)
-        searchable_terms = _terms(searchable)
-        tags = {str(tag) for tag in memory.get("tags", [])}
-        file_path = _normalize_path(context.get("file", ""))
-        basename = os.path.basename(file_path)
-        entry = {
-            "ordinal": ordinal,
-            "memory": memory,
-            "searchable": searchable,
-            "terms": searchable_terms,
-            "tags": tags,
-            "file": file_path,
-            "basename": basename,
-            "status": _memory_status(memory),
-            "evidence_status": _evidence_status(memory),
-        }
-        entries.append(entry)
-        for term in sorted(searchable_terms):
+    for ordinal, entry in enumerate(entries):
+        memory = entry["memory"]
+        entry["ordinal"] = ordinal
+        for term in sorted(entry["terms"]):
             _append_index(term_index, term, ordinal)
-        for tag in sorted(tags):
+        for tag in sorted(entry["tags"]):
             _append_index(tag_index, tag, ordinal)
         _append_index(type_index, str(memory.get("type", "")), ordinal)
-        _append_index(file_index, file_path, ordinal)
-        _append_index(basename_index, basename, ordinal)
+        _append_index(file_index, entry["file"], ordinal)
+        _append_index(basename_index, entry["basename"], ordinal)
 
     return {
         "schema_version": RECALL_PROJECTION_SCHEMA_VERSION,
@@ -145,12 +147,160 @@ def build_recall_projection(memories: Iterable[Dict[str, Any]]) -> Dict[str, Any
         "snapshot_memory_count": len(entries),
         "indexed_term_count": len(term_index),
         "built_from_single_snapshot": True,
+        "build": build_stats,
+    }
+
+
+def build_recall_projection(
+    memories: Iterable[Dict[str, Any]],
+    previous_projection: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Build or incrementally update an inverted canonical-snapshot projection."""
+    prior_by_id: Dict[str, Dict[str, Any]] = {}
+    if (
+        isinstance(previous_projection, dict)
+        and previous_projection.get("schema_version")
+        == RECALL_PROJECTION_SCHEMA_VERSION
+    ):
+        for entry in previous_projection.get("entries", []):
+            memory = entry.get("memory", {}) if isinstance(entry, dict) else {}
+            memory_id = str(memory.get("id", ""))
+            if memory_id:
+                prior_by_id[memory_id] = entry
+
+    entries: List[Dict[str, Any]] = []
+    current_ids: Set[str] = set()
+    reused = 0
+    rebuilt = 0
+    for ordinal, memory in enumerate(memories):
+        memory_id = str(memory.get("id", ""))
+        current_ids.add(memory_id)
+        prior = prior_by_id.get(memory_id)
+        if prior and prior.get("memory") == memory:
+            entry = dict(prior)
+            entry["ordinal"] = ordinal
+            entry["memory"] = memory
+            entries.append(entry)
+            reused += 1
+            continue
+        entries.append(_build_recall_entry(memory, ordinal))
+        rebuilt += 1
+
+    removed = len(set(prior_by_id) - current_ids)
+    return _assemble_recall_projection(
+        entries,
+        {
+            "entries_reused": reused,
+            "entries_rebuilt": rebuilt,
+            "entries_removed": removed,
+        },
+    )
+
+
+def serialize_recall_projection(projection: Dict[str, Any]) -> Dict[str, Any]:
+    """Convert the in-process sets into a safe JSON cache representation."""
+    entries = []
+    for entry in projection.get("entries", []):
+        entries.append({
+            "memory": entry.get("memory", {}),
+            "searchable": entry.get("searchable", ""),
+            "terms": sorted(entry.get("terms", [])),
+        })
+    return {
+        "schema_version": projection.get("schema_version"),
+        "entries": entries,
+        "term_index": projection.get("term_index", {}),
+        "tag_index": projection.get("tag_index", {}),
+        "type_index": projection.get("type_index", {}),
+        "file_index": projection.get("file_index", {}),
+        "basename_index": projection.get("basename_index", {}),
+        "snapshot_signature": projection.get("snapshot_signature"),
+        "snapshot_memory_count": projection.get("snapshot_memory_count", 0),
+        "indexed_term_count": projection.get("indexed_term_count", 0),
+        "built_from_single_snapshot": projection.get(
+            "built_from_single_snapshot", False
+        ),
+    }
+
+
+def deserialize_recall_projection(payload: Any) -> Dict[str, Any]:
+    """Validate and restore a JSON projection without executing cached data."""
+    if not isinstance(payload, dict):
+        raise ValueError("recall projection cache payload must be an object")
+    if payload.get("schema_version") != RECALL_PROJECTION_SCHEMA_VERSION:
+        raise ValueError("recall projection cache schema mismatch")
+    raw_entries = payload.get("entries")
+    if not isinstance(raw_entries, list):
+        raise ValueError("recall projection entries must be a list")
+    entries: List[Dict[str, Any]] = []
+    for ordinal, raw in enumerate(raw_entries):
+        if (
+            not isinstance(raw, dict)
+            or not isinstance(raw.get("memory"), dict)
+            or not isinstance(raw.get("searchable"), str)
+            or not isinstance(raw.get("terms"), list)
+            or not all(isinstance(term, str) for term in raw.get("terms", []))
+        ):
+            raise ValueError("recall projection entry is invalid")
+        memory = raw["memory"]
+        context = memory.get("context", {})
+        file_path = _normalize_path(context.get("file", ""))
+        entries.append({
+            "ordinal": ordinal,
+            "memory": memory,
+            "searchable": raw["searchable"],
+            "terms": raw["terms"],
+            "tags": [str(tag) for tag in memory.get("tags", [])],
+            "file": file_path,
+            "basename": os.path.basename(file_path),
+            "status": _memory_status(memory),
+            "evidence_status": _evidence_status(memory),
+        })
+
+    indexes: Dict[str, Dict[str, List[int]]] = {}
+    for field in (
+        "term_index",
+        "tag_index",
+        "type_index",
+        "file_index",
+        "basename_index",
+    ):
+        index = payload.get(field)
+        if not isinstance(index, dict) or any(
+            not isinstance(key, str)
+            or not isinstance(postings, list)
+            or not all(
+                isinstance(value, int) and 0 <= value < len(entries)
+                for value in postings
+            )
+            for key, postings in index.items()
+        ):
+            raise ValueError(f"recall projection {field} is invalid")
+        indexes[field] = index
+
+    if payload.get("snapshot_memory_count") != len(entries):
+        raise ValueError("recall projection memory count mismatch")
+    if not isinstance(payload.get("snapshot_signature"), str):
+        raise ValueError("recall projection signature missing")
+    return {
+        "schema_version": payload["schema_version"],
+        "entries": entries,
+        **indexes,
+        "snapshot_signature": payload["snapshot_signature"],
+        "snapshot_memory_count": len(entries),
+        "indexed_term_count": int(payload.get("indexed_term_count", 0)),
+        "built_from_single_snapshot": True,
+        "build": {
+            "entries_reused": len(entries),
+            "entries_rebuilt": 0,
+            "entries_removed": 0,
+        },
     }
 
 
 def projection_metadata(projection: Dict[str, Any]) -> Dict[str, Any]:
     """Return the serializable proof surface, excluding in-process indexes."""
-    return {
+    metadata = {
         "schema_version": projection.get("schema_version"),
         "snapshot_signature": projection.get("snapshot_signature"),
         "snapshot_memory_count": int(projection.get("snapshot_memory_count", 0)),
@@ -159,6 +309,9 @@ def projection_metadata(projection: Dict[str, Any]) -> Dict[str, Any]:
             projection.get("built_from_single_snapshot", False)
         ),
     }
+    if isinstance(projection.get("cache"), dict):
+        metadata["cache"] = copy.deepcopy(projection["cache"])
+    return metadata
 
 
 def _posting_union(index: Dict[str, List[int]], keys: Iterable[str]) -> Set[int]:
@@ -197,7 +350,7 @@ def _query_signals(
     )
     for ordinal in candidates:
         entry = projection["entries"][ordinal]
-        matched_terms = query_terms & entry["terms"]
+        matched_terms = query_terms.intersection(entry["terms"])
         exact = normalized_query in entry["searchable"]
         if not exact and query_terms and not matched_terms:
             continue
@@ -442,7 +595,9 @@ __all__ = [
     "MULTI_SIGNAL_MATCH_MODEL",
     "RECALL_PROJECTION_SCHEMA_VERSION",
     "build_recall_projection",
+    "deserialize_recall_projection",
     "projection_metadata",
     "rank_recall_projection",
     "recall_from_projection",
+    "serialize_recall_projection",
 ]

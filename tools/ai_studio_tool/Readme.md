@@ -5,7 +5,7 @@
 
 > **Schema Version:** 4.1.0-memory
 > **Entry Point:** `tools/ai_studio_tool/hott_kernel.py`
-> **Fixture Baseline:** 38 fixture minimal + 2 portable integration smoke PASS
+> **Fixture Baseline:** 39 fixture minimal + 2 portable integration smoke PASS
 
 ---
 
@@ -168,7 +168,7 @@ excerpt line pada mode `detail=source`. Jika keduanya tidak muat, memory yang
 dilepas—bukan source. Output `budget.allocation` membuat pembagian ini dapat
 diaudit.
 
-### 2.2B Cache Persisten Dua Lapis
+### 2.2B Cache Persisten Tiga Lapis
 
 Lapis pertama menyimpan snapshot source. Kernel tetap melakukan satu
 discovery/stat pass pada setiap invokasi, tetapi tidak membuka source atau
@@ -192,15 +192,31 @@ error analyzer selalu dijalankan ulang. Entry ini tidak menyimpan source penuh,
 tetapi dapat memuat evidence turunan seperti path, finding, dan snippet, sehingga
 tetap lokal, Git-ignored, atomik, dan owner-only.
 
+Lapis ketiga menyimpan `memory-recall-projection-v1` di scope runtime project.
+Pada warm hit, kernel tetap meng-hash seluruh byte canonical memory store dengan
+SHA-256, tetapi tidak perlu mem-parse JSON atau membangun ulang inverted index.
+Cache hanya valid jika hash store, scope, schema, dan hash source engine
+projection identik. Bila store berubah, canonical JSON dibaca satu kali lalu
+record penuh yang identik secara struktural dipakai ulang; add/change/delete
+direkonsiliasi per memory. Cache ini memuat full memory record, tetapi tidak
+dapat memulihkan canonical store dan tidak boleh menutupi recovery dari backup.
+SHA-256 di sini mendeteksi state lokal stale/rusak, bukan trust anchor terhadap
+tampering eksternal.
+
 Kegagalan baca/tulis atau JSON rusak pada salah satu lapis tidak menggagalkan
 analisis; kernel menghitung ulang dan melaporkan statusnya. `--cache-mode`
-berlaku pada kedua lapis, sedangkan `cache status|refresh|clear` mengelola
-keduanya untuk root yang sama.
+berlaku pada ketiga lapis untuk mode `context` dan pada recall cache untuk
+`memory recall`, sedangkan
+`cache status|refresh|clear` mengelola ketiganya untuk root/scope yang sama.
+`cache clear` hanya menghapus data derived dan tidak menghapus canonical memory.
 
 Field `graph_cache` membuat reuse dapat diaudit: `status`, `files_reused`,
 `files_read`, `files_added`, `files_changed`, `files_deleted`, dan `hit_ratio`.
 Field `analyzer_cache` melaporkan `status`, `analyzers_reused`,
 `analyzers_executed`, `reused_count`, `executed_count`, dan signature invalidasi.
+Field `memory_retrieval.projection.cache` melaporkan `status`, jumlah load
+canonical store, `entries_reused/rebuilt/removed`, hit ratio, store SHA-256,
+engine signature, serta batas authority/security cache.
 
 ### 2.2C Runtime Memory yang Project-Scoped dan Durable
 
@@ -629,6 +645,7 @@ tools/ai_studio_tool/
 │   ├── store.py                     # CRUD, associations, retrieval
 │   ├── runtime.py                   # Project scope, lock, atomic JSON, recovery
 │   ├── retrieval.py                 # Single-snapshot inverted recall projection
+│   ├── retrieval_cache.py           # Persistent projection + per-memory invalidation
 │   ├── provenance.py                # Bounded observation journal + checkpoint
 │   ├── graph.py                     # Memory graph & adjacency builder
 │   ├── analyzers.py                 # Memory fragmentation, hub, manifold, Betti
@@ -699,7 +716,7 @@ Tidak semua hal perlu terhubung. β₀ tinggi bisa valid jika memang domain berb
 | Memory operations | 12 |
 | Fiber operations | 8 |
 | Safety checks | 2 (cycle prevention, fiber compatibility) |
-| Fixture baseline | 38 fixture minimal + 2 portable integration smoke PASS |
+| Fixture baseline | 39 fixture minimal + 2 portable integration smoke PASS |
 | Directed-cycle safety | 0 directed reasoning witness untuk safe bridge |
 | Zero-dependency | Python 3 stdlib only |
 

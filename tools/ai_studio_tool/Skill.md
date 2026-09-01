@@ -300,7 +300,7 @@ diabaikan untuk β₀/β₁, sehingga β₁ **bukan** jumlah circular import.
 | `memory_context.selected_count` | Memory evidence yang benar-benar masuk budget | Perlakukan sebagai observasi dan verifikasi ke source |
 | `memory_scope.scope_id` | Identitas project scope runtime | Pastikan tidak berubah/tercampur antar proyek |
 | `memory_retrieval.claim_boundary` | Projection lexical/path exact untuk predicate terdeklarasi, bukan semantic relevance proof | Jangan klaim semantic match yang tidak dihitung |
-| `memory_retrieval.projection.source_store_loads` | `1` untuk gabungan query + seluruh explicit target | Pastikan satu request tidak membaca canonical store berulang kali |
+| `memory_retrieval.projection.source_store_loads` | `1` pada cold/changed snapshot, `0` pada exact warm hit | Pastikan satu request tidak membaca canonical store berulang kali |
 | `memory_retrieval.projection.snapshot_consistent` | Semua candidate berasal dari snapshot/signature yang sama | Gunakan signature sebagai provenance selection |
 | `memory_retrieval.projection.candidate_count` | Ukuran subspace yang benar-benar dirangking | Bandingkan dengan `snapshot_memory_count`, bukan total token prompt |
 | `memory_retrieval.projection.target_witness_satisfied` | Minimal satu exact/path target memory menutup slot saat diwajibkan | Audit explicit-target coverage tanpa mengalahkan query utama |
@@ -333,6 +333,20 @@ diabaikan untuk β₀/β₁, sehingga β₁ **bukan** jumlah circular import.
 | `status=write_failed` | Analisis sukses tetapi evidence tidak tersimpan | Periksa permission folder tool |
 | `contains_full_source_content=false` | Tidak ada snapshot source penuh | Evidence turunan tetap dapat sensitif dan harus lokal |
 | `analyzers_reused/executed` | Provenance per analyzer | Pastikan LLM tahu bukti reused atau fresh |
+
+### 4.2F Reading `memory_retrieval.projection.cache`
+
+| Field | Interpretasi | Action |
+|---|---|---|
+| `status=hit` | Store SHA, scope, schema, dan engine identik | `canonical_store_load_count` harus 0 |
+| `status=partial` | Canonical store berubah tetapi sebagian record identik | Audit `entries_reused/rebuilt/removed` |
+| `status=miss/refreshed` | Projection dibangun penuh dari canonical snapshot | Normal pada build pertama/forced refresh |
+| `status=recovered` | Cache derived rusak dan berhasil dihitung ulang | Periksa `recovery_reason`; canonical tetap authority |
+| `status=write_failed` | Recall sukses tetapi projection tidak tersimpan | Periksa permission; jangan anggap recall gagal |
+| `canonical_recovery_pending=true` | Primary hilang dan backup tersedia | Cache tidak boleh hit; canonical recovery harus dijalankan |
+| `contains_full_memory_content=true` | Cache memuat record memory penuh | Jaga lokal, Git-ignore, dan owner-only |
+| `cache_can_restore_canonical_store=false` | Cache bukan backup atau source of truth | Jangan gunakan untuk merekonstruksi state canonical |
+| `integrity_boundary` | SHA-256 mendeteksi stale/kerusakan lokal | Bukan bukti anti-tamper eksternal |
 
 ### 4.3 Reading `memory analyze` Output
 
@@ -599,6 +613,7 @@ tools/ai_studio_tool/
 │   ├── store.py                     # CRUD, associations, retrieval
 │   ├── runtime.py                   # Project scope, lock, atomic JSON, recovery
 │   ├── retrieval.py                 # Single-snapshot inverted recall projection
+│   ├── retrieval_cache.py           # Persistent projection + per-memory invalidation
 │   ├── provenance.py                # Bounded observation journal + checkpoint
 │   ├── graph.py                     # Memory graph & adjacency builder
 │   ├── analyzers.py                 # Memory fragmentation, hub, manifold, Betti
