@@ -151,6 +151,24 @@ except ImportError:
         MEMORY_AVAILABLE = False
 
 try:
+    from memory.store import (
+        clear_memory_recall_cache,
+        get_memory_recall_cache_status,
+        refresh_memory_recall_cache,
+    )
+    MEMORY_RECALL_CACHE_AVAILABLE = True
+except ImportError:
+    try:
+        from memory_store import (
+            clear_memory_recall_cache,
+            get_memory_recall_cache_status,
+            refresh_memory_recall_cache,
+        )
+        MEMORY_RECALL_CACHE_AVAILABLE = True
+    except ImportError:
+        MEMORY_RECALL_CACHE_AVAILABLE = False
+
+try:
     from memory.synthesizer import (
         compute_memory_fingerprint,
         establish_memory_baseline,
@@ -408,7 +426,7 @@ def _run_kernel_analyzers(
 
 
 def kernel_cache(action: str, scan_root: str = ".") -> Dict[str, Any]:
-    """Inspect, refresh, or clear source snapshots and analyzer evidence."""
+    """Manage source, analyzer, and scoped memory-recall derived caches."""
     if not GRAPH_CACHE_AVAILABLE:
         return _kernel_error(
             "graph_cache_unavailable",
@@ -425,6 +443,7 @@ def kernel_cache(action: str, scan_root: str = ".") -> Dict[str, Any]:
         root_error = _validate_scan_root(scan_root)
         if root_error:
             return root_error
+    _bind_memory_scope_to_scan(scan_root)
     if action == "status":
         cache_result = get_graph_cache_status(scan_root)
         if ANALYZER_CACHE_AVAILABLE:
@@ -448,6 +467,11 @@ def kernel_cache(action: str, scan_root: str = ".") -> Dict[str, Any]:
             cache_result["analyzer_cache"] = analyzer_cache_result
         else:
             cache_result["analyzer_cache"] = {"status": "unavailable"}
+        cache_result["memory_recall_cache"] = (
+            get_memory_recall_cache_status()
+            if MEMORY_RECALL_CACHE_AVAILABLE
+            else {"status": "unavailable"}
+        )
     elif action == "clear":
         cache_result = clear_graph_cache(scan_root)
         if cache_result.get("status") == "clear_failed":
@@ -471,6 +495,19 @@ def kernel_cache(action: str, scan_root: str = ".") -> Dict[str, Any]:
                 )
         else:
             cache_result["analyzer_cache"] = {"status": "unavailable"}
+        memory_cache_result = (
+            clear_memory_recall_cache()
+            if MEMORY_RECALL_CACHE_AVAILABLE
+            else {"status": "unavailable"}
+        )
+        cache_result["memory_recall_cache"] = memory_cache_result
+        if memory_cache_result.get("status") == "clear_failed":
+            return _kernel_error(
+                "memory_recall_cache_clear_failed",
+                "derived memory recall cache could not be removed",
+                scan_root=scan_root,
+                cache=cache_result,
+            )
     else:
         graph = build_cached_shared_graph(scan_root, mode="refresh")
         analyzer_output = (
@@ -482,8 +519,20 @@ def kernel_cache(action: str, scan_root: str = ".") -> Dict[str, Any]:
         cache_result = {
             **cache_result,
             "analyzer_cache": analyzer_output.get("cache", {}),
+            "memory_recall_cache": (
+                refresh_memory_recall_cache()
+                if MEMORY_RECALL_CACHE_AVAILABLE
+                else {"status": "unavailable"}
+            ),
             "graph_summary": graph.get("summary", {}),
         }
+        if cache_result["memory_recall_cache"].get("status") == "write_failed":
+            return _kernel_error(
+                "memory_recall_cache_refresh_failed",
+                "derived memory recall cache could not be refreshed",
+                scan_root=scan_root,
+                cache=cache_result,
+            )
     return {
         "schema_version": CODEBASE_SCHEMA_VERSION,
         "mode": "cache",
@@ -584,6 +633,7 @@ def kernel_memory_recall(
         memory_type=memory_type,
         tags=tag_list,
         limit=limit,
+        cache_mode=_ACTIVE_GRAPH_CACHE_MODE,
     )
 
     return {
@@ -1832,6 +1882,7 @@ def kernel_context(
             max_memories=5,
             current_graph_signature=current_graph_signature,
             current_file_hashes=current_file_hashes,
+            cache_mode=_ACTIVE_GRAPH_CACHE_MODE,
         )
     pack = build_context_pack(
         graph,

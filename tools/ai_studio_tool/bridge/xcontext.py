@@ -107,6 +107,7 @@ def get_memory_evidence(
     current_graph_signature: Optional[str] = None,
     current_file_hashes: Optional[Dict[str, str]] = None,
     include_stale: bool = False,
+    cache_mode: str = "auto",
 ) -> Dict[str, Any]:
     """Recall scoped evidence for a developer query and optional file targets."""
     try:
@@ -123,7 +124,7 @@ def get_memory_evidence(
         }
 
     normalized_targets = [str(path).replace("\\", "/") for path in (target_files or [])]
-    projection = build_projection()
+    projection = build_projection(cache_mode=cache_mode)
     ranked = rank_projection(
         projection,
         query=query,
@@ -172,8 +173,11 @@ def get_memory_evidence(
 
     runtime = runtime_provenance()
     trace = dict(ranked.get("trace", {}))
+    recall_cache = trace.get("cache", {})
     trace.update({
-        "source_store_loads": 1,
+        "source_store_loads": int(
+            recall_cache.get("canonical_store_load_count", 1)
+        ),
         "freshness_evaluated_count": freshness_evaluated_count,
         "selected_count": len(selected),
         "target_witness_required": target_witness_required,

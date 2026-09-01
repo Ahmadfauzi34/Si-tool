@@ -3406,7 +3406,6 @@ def test_f41_snapshot_consistent_memory_recall_projection():
             project_root=str(project),
             state_dir=str(state_dir),
         )
-        original_load_store = memory_store.load_store
         try:
             store = memory_store._default_store()
             for index in range(256):
@@ -3436,14 +3435,24 @@ def test_f41_snapshot_consistent_memory_recall_projection():
             )
             store["memories"].extend([target_memory, rare_memory])
             memory_store.save_store(store)
+            memory_store.clear_memory_recall_cache()
 
             first_projection = memory_store.build_memory_recall_projection()
             second_projection = memory_store.build_memory_recall_projection()
+            first_cache = first_projection.get("cache", {})
+            second_cache = second_projection.get("cache", {})
             expect(
                 first_projection.get("snapshot_signature")
                 == second_projection.get("snapshot_signature")
                 and first_projection.get("snapshot_memory_count") == 258,
                 f"{name}: projection snapshot harus deterministik dan complete",
+            )
+            expect(
+                first_cache.get("status") == "miss"
+                and first_cache.get("canonical_store_load_count") == 1
+                and second_cache.get("status") == "hit"
+                and second_cache.get("canonical_store_load_count") == 0,
+                f"{name}: projection cold/warm harus transparan dan ekuivalen",
             )
 
             rare_rank = rank_recall_projection(
@@ -3463,15 +3472,13 @@ def test_f41_snapshot_consistent_memory_recall_projection():
                 f"{name}: projection tidak boleh mengklaim omitted memory irrelevant",
             )
 
-            load_calls = 0
-
-            def counted_load_store():
-                nonlocal load_calls
-                load_calls += 1
-                return original_load_store()
-
-            memory_store.load_store = counted_load_store
+            memory_store.clear_memory_recall_cache()
             evidence = get_memory_evidence(
+                query="common query hazard",
+                target_files=[target_file],
+                max_memories=2,
+            )
+            repeated_evidence = get_memory_evidence(
                 query="common query hazard",
                 target_files=[target_file],
                 max_memories=2,
@@ -3479,8 +3486,16 @@ def test_f41_snapshot_consistent_memory_recall_projection():
             selected = evidence.get("memories", [])
             selected_ids = {memory.get("id") for memory in selected}
             trace = evidence.get("retrieval", {}).get("projection", {})
+            repeated_trace = repeated_evidence.get("retrieval", {}).get(
+                "projection", {}
+            )
             expect(
-                load_calls == 1 and trace.get("source_store_loads") == 1,
+                trace.get("source_store_loads") == 1
+                and trace.get("cache", {}).get("status") == "miss"
+                and repeated_trace.get("source_store_loads") == 0
+                and repeated_trace.get("cache", {}).get("status") == "hit"
+                and trace.get("snapshot_signature")
+                == repeated_trace.get("snapshot_signature"),
                 f"{name}: query+target harus memakai tepat satu canonical snapshot",
             )
             expect(
@@ -3506,7 +3521,6 @@ def test_f41_snapshot_consistent_memory_recall_projection():
                 f"{name}: target memory harus membawa alasan selection",
             )
 
-            memory_store.load_store = original_load_store
             compatibility = memory_store.recall_memories(
                 query="nondeterministic chrono nonce",
                 limit=2,
@@ -3519,7 +3533,228 @@ def test_f41_snapshot_consistent_memory_recall_projection():
                 f"{name}: public recall contract harus backward-compatible",
             )
         finally:
-            memory_store.load_store = original_load_store
+            reset_memory_runtime_configuration()
+
+
+def test_f42_persistent_incremental_memory_recall_cache():
+    """Derived recall cache must be exact, incremental, and non-authoritative."""
+    name = "F42"
+    import stat
+    from unittest.mock import patch
+
+    import memory.store as memory_store
+    from memory.runtime import (
+        configure_memory_runtime,
+        get_memory_runtime_paths,
+        reset_memory_runtime_configuration,
+    )
+
+    with tempfile.TemporaryDirectory(prefix="ai-studio-memory-recall-cache-") as tmp:
+        root = Path(tmp)
+        state_dir = root / "state"
+        project = root / "project"
+        project.mkdir(parents=True)
+        configure_memory_runtime(
+            project_root=str(project),
+            state_dir=str(state_dir),
+        )
+        try:
+            store = memory_store._default_store()
+            for index in range(256):
+                store["memories"].append(memory_store._new_memory_record(
+                    "semantic",
+                    f"bounded cache witness {index}",
+                    "f42-cache",
+                    0.5,
+                    ["cache"],
+                    {"file": f"src/cache/witness_{index}.ts"},
+                ))
+            memory_store.save_store(store)
+            paths = get_memory_runtime_paths(create=True)
+            cache_path = Path(paths["recall_cache_path"])
+            integrity_path = Path(f"{cache_path}.sha256")
+            store_path = Path(paths["store_path"])
+
+            cold = memory_store.build_memory_recall_projection()
+            warm = memory_store.build_memory_recall_projection()
+            cold_cache = cold.get("cache", {})
+            warm_cache = warm.get("cache", {})
+            expect(
+                cold_cache.get("status") == "miss"
+                and cold_cache.get("canonical_store_load_count") == 1
+                and cold_cache.get("entries_rebuilt") == 256
+                and warm_cache.get("status") == "hit"
+                and warm_cache.get("canonical_store_load_count") == 0
+                and warm_cache.get("entries_reused") == 256,
+                f"{name}: cold miss dan warm exact hit harus terukur",
+            )
+            expect(
+                cold.get("snapshot_signature") == warm.get("snapshot_signature")
+                and [item.get("memory", {}).get("id") for item in
+                     memory_store.rank_memory_recall_projection(
+                         cold, query="bounded cache witness 7"
+                     ).get("candidates", [])]
+                == [item.get("memory", {}).get("id") for item in
+                    memory_store.rank_memory_recall_projection(
+                        warm, query="bounded cache witness 7"
+                    ).get("candidates", [])],
+                f"{name}: cache hit tidak boleh mengubah ranking",
+            )
+            cached_payload = json.loads(cache_path.read_text(encoding="utf-8"))
+            expect(
+                cached_payload.get("contains_full_memory_content") is True
+                and cached_payload.get("canonical_store_authoritative") is True
+                and cached_payload.get("cache_can_restore_canonical_store") is False,
+                f"{name}: authority dan sensitivitas cache harus eksplisit",
+            )
+            if os.name != "nt":
+                expect(
+                    stat.S_IMODE(cache_path.stat().st_mode) == 0o600,
+                    f"{name}: cache yang memuat content harus owner-only",
+                )
+                expect(
+                    stat.S_IMODE(integrity_path.stat().st_mode) == 0o600,
+                    f"{name}: cache integrity sidecar harus owner-only",
+                )
+
+            mutated_store = memory_store.load_store()
+            mutated_store["memories"][7]["content"] = (
+                "bounded cache witness 7 changed"
+            )
+            memory_store.save_store(mutated_store)
+            changed = memory_store.build_memory_recall_projection()
+            changed_cache = changed.get("cache", {})
+            expect(
+                changed_cache.get("status") == "partial"
+                and changed_cache.get("canonical_store_load_count") == 1
+                and changed_cache.get("entries_reused") == 255
+                and changed_cache.get("entries_rebuilt") == 1
+                and changed_cache.get("entries_removed") == 0,
+                f"{name}: satu mutation harus rebuild tepat satu record",
+            )
+
+            added_store = memory_store.load_store()
+            added_memory = memory_store._new_memory_record(
+                "episodic",
+                "newly added recall cache witness",
+                "f42-cache",
+                0.9,
+                ["cache", "added"],
+                {"file": "src/cache/added.ts"},
+            )
+            added_store["memories"].append(added_memory)
+            memory_store.save_store(added_store)
+            added = memory_store.build_memory_recall_projection()
+            added_cache = added.get("cache", {})
+            expect(
+                added_cache.get("status") == "partial"
+                and added_cache.get("entries_reused") == 256
+                and added_cache.get("entries_rebuilt") == 1
+                and added.get("snapshot_memory_count") == 257,
+                f"{name}: add harus mempertahankan projection entry lama",
+            )
+
+            deleted_store = memory_store.load_store()
+            deleted_store["memories"] = [
+                memory for memory in deleted_store["memories"]
+                if memory.get("id") != added_memory["id"]
+            ]
+            memory_store.save_store(deleted_store)
+            deleted = memory_store.build_memory_recall_projection()
+            deleted_cache = deleted.get("cache", {})
+            expect(
+                deleted_cache.get("status") == "partial"
+                and deleted_cache.get("entries_reused") == 256
+                and deleted_cache.get("entries_rebuilt") == 0
+                and deleted_cache.get("entries_removed") == 1
+                and deleted.get("snapshot_memory_count") == 256,
+                f"{name}: delete harus membuang tepat satu entry derived",
+            )
+
+            with patch(
+                "memory.retrieval_cache._engine_signature",
+                return_value="sha256:changed-engine",
+            ):
+                engine_invalidated = (
+                    memory_store.build_memory_recall_projection()
+                )
+            engine_cache = engine_invalidated.get("cache", {})
+            expect(
+                engine_cache.get("status") == "invalidated"
+                and "projection_engine_changed"
+                in engine_cache.get("invalidation_reasons", [])
+                and engine_cache.get("entries_rebuilt") == 256,
+                f"{name}: perubahan engine harus full rebuild",
+            )
+
+            cache_path.write_text("{broken-json", encoding="utf-8")
+            recovered = memory_store.build_memory_recall_projection()
+            expect(
+                recovered.get("cache", {}).get("status") == "recovered"
+                and recovered.get("cache", {}).get(
+                    "canonical_store_load_count"
+                ) == 1
+                and recovered.get("snapshot_memory_count") == 256,
+                f"{name}: cache corrupt harus fallback ke canonical store",
+            )
+
+            # Re-save the same logical snapshot so the backup is valid, then
+            # remove the primary. A cache hit must not hide canonical recovery.
+            recovery_store = memory_store.load_store()
+            memory_store.save_store(recovery_store)
+            memory_store.build_memory_recall_projection()
+            store_path.unlink()
+            recovery_pending = memory_store.get_memory_recall_cache_status()
+            recovered_primary = memory_store.build_memory_recall_projection()
+            expect(
+                recovery_pending.get("status") == "stale"
+                and "canonical_recovery_pending"
+                in recovery_pending.get("stale_reasons", [])
+                and recovered_primary.get("cache", {}).get(
+                    "canonical_store_load_count"
+                ) == 1
+                and "canonical_recovery_pending"
+                in recovered_primary.get("cache", {}).get(
+                    "invalidation_reasons", []
+                )
+                and store_path.is_file(),
+                f"{name}: derived hit tidak boleh menutupi backup recovery",
+            )
+
+            memory_store.clear_memory_recall_cache()
+            disabled = memory_store.build_memory_recall_projection(
+                cache_mode="off"
+            )
+            expect(
+                disabled.get("cache", {}).get("status") == "disabled"
+                and not cache_path.exists()
+                and not integrity_path.exists(),
+                f"{name}: mode off harus bypass read/write cache",
+            )
+
+            with patch(
+                "memory.retrieval_cache.write_json_unlocked",
+                side_effect=OSError("read-only cache target"),
+            ):
+                write_failed = memory_store.build_memory_recall_projection()
+            expect(
+                write_failed.get("cache", {}).get("status") == "write_failed"
+                and write_failed.get("snapshot_memory_count") == 256,
+                f"{name}: write failure tidak boleh menggagalkan recall",
+            )
+
+            refreshed = memory_store.refresh_memory_recall_cache()
+            status = memory_store.get_memory_recall_cache_status()
+            cleared = memory_store.clear_memory_recall_cache()
+            canonical_after_clear = memory_store.load_store()
+            expect(
+                refreshed.get("status") == "refreshed"
+                and status.get("status") == "valid"
+                and cleared.get("status") == "cleared"
+                and len(canonical_after_clear.get("memories", [])) == 256,
+                f"{name}: status/refresh/clear hanya boleh mengelola derived cache",
+            )
+        finally:
             reset_memory_runtime_configuration()
 
 
@@ -3860,6 +4095,7 @@ def main():
         test_f39_memory_semantic_integrity,
         test_f40_bounded_provenance_retention,
         test_f41_snapshot_consistent_memory_recall_projection,
+        test_f42_persistent_incremental_memory_recall_cache,
         test_kernel_wiring_smoke,
         test_kernel_cli_contract,
     ]
@@ -3876,7 +4112,7 @@ def main():
             print(f"- {failure}")
         sys.exit(1)
 
-    print("PASS: 38 fixture minimal + 2 portable integration smoke aman")
+    print("PASS: 39 fixture minimal + 2 portable integration smoke aman")
 
 
 if __name__ == "__main__":

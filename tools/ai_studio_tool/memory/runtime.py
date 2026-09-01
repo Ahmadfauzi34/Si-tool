@@ -138,6 +138,7 @@ def get_memory_runtime_paths(create: bool = True) -> Dict[str, Any]:
         "scope_name": display_name,
         "project_root": str(project_root),
         "store_path": str(scope_dir / "memory_store.json"),
+        "recall_cache_path": str(scope_dir / "recall_projection_cache.json"),
         "baseline_path": str(scope_dir / "memory_baseline.json"),
         "consolidation_log_path": str(scope_dir / "consolidation_log.json"),
         "fiber_state_path": str(scope_dir / "fiber_state.json"),
@@ -230,13 +231,19 @@ def write_json_unlocked(
     payload: Any,
     *,
     retain_backup: bool = True,
+    compact: bool = False,
 ) -> None:
     """Atomically write JSON. Caller must hold ``memory_runtime_lock``."""
     path = Path(path_value)
     if retain_backup and path.is_file():
         previous = path.read_bytes()
         _atomic_write_bytes(Path(f"{path}.bak"), previous)
-    serialized = json.dumps(payload, indent=2, ensure_ascii=False).encode("utf-8")
+    serialized = json.dumps(
+        payload,
+        indent=None if compact else 2,
+        ensure_ascii=False,
+        separators=(",", ":") if compact else None,
+    ).encode("utf-8")
     _atomic_write_bytes(path, serialized)
 
 
@@ -348,6 +355,7 @@ def memory_runtime_provenance() -> Dict[str, Any]:
         "scope_name": paths["scope_name"],
         "project_root": paths["project_root"],
         "store_path": store_path,
+        "recall_cache_path": paths["recall_cache_path"],
         "recovery": _LAST_RECOVERY.get(store_path, {"status": "none"}),
         "storage_claim": "project-scoped local JSON runtime; not model memory",
     }

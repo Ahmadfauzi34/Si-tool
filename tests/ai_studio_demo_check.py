@@ -331,12 +331,24 @@ def test_angular_context_optimizer():
     )
     memory_retrieval = cache_context.get("memory_context", {}).get("retrieval", {})
     memory_projection = memory_retrieval.get("projection", {})
+    repeated_memory_projection = repeated.get("memory_context", {}).get(
+        "retrieval", {}
+    ).get("projection", {})
     expect(
         memory_retrieval.get("model")
         == "scoped_memory_recall_projection_v3_freshness"
         and memory_projection.get("source_store_loads") == 1
+        and memory_projection.get("cache", {}).get("status") == "miss"
         and memory_projection.get("snapshot_consistent") is True,
         "DEMO: context memory harus memakai satu snapshot recall projection",
+    )
+    expect(
+        repeated_memory_projection.get("source_store_loads") == 0
+        and repeated_memory_projection.get("cache", {}).get("status") == "hit"
+        and repeated_memory_projection.get("cache", {}).get(
+            "entries_reused"
+        ) == repeated_memory_projection.get("snapshot_memory_count"),
+        "DEMO: context kedua harus reuse recall projection tanpa parse store",
     )
     expect(
         memory_projection.get("omitted_semantic_relevance_proven") is False
@@ -349,9 +361,7 @@ def test_angular_context_optimizer():
     )
     expect(
         memory_projection.get("snapshot_signature")
-        == repeated.get("memory_context", {}).get("retrieval", {}).get(
-            "projection", {}
-        ).get("snapshot_signature"),
+        == repeated_memory_projection.get("snapshot_signature"),
         "DEMO: memory projection signature harus stabil pada snapshot identik",
     )
     expect(
@@ -390,7 +400,16 @@ def test_angular_context_optimizer():
         target_context.get("quotient_summary", {}).get("original_vertex_count") == 27,
         "DEMO: quotient harus berasal dari snapshot Angular lengkap",
     )
-    run_kernel("cache", "clear", "src")
+    cache_status = run_kernel("cache", "status", "src").get("cache", {})
+    expect(
+        cache_status.get("memory_recall_cache", {}).get("status") == "valid",
+        "DEMO: cache status harus mencakup scoped memory recall projection",
+    )
+    cleared = run_kernel("cache", "clear", "src").get("cache", {})
+    expect(
+        cleared.get("memory_recall_cache", {}).get("status") == "cleared",
+        "DEMO: cache clear harus menghapus derived recall cache",
+    )
 
 
 def main():

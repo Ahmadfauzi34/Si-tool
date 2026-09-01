@@ -28,9 +28,13 @@ from memory.provenance import (
     validate_provenance_event_limit,
 )
 from memory.retrieval import (
-    build_recall_projection,
     rank_recall_projection,
     recall_from_projection,
+)
+from memory.retrieval_cache import (
+    clear_recall_cache_unlocked,
+    get_recall_cache_status_unlocked,
+    load_or_build_recall_projection_unlocked,
 )
 
 SCHEMA_VERSION = "4.1.0-memory"
@@ -817,6 +821,7 @@ def recall_memories(
     limit: int = 20,
     include_archived: bool = False,
     include_historical_evidence: bool = False,
+    cache_mode: str = "auto",
 ) -> List[Dict[str, Any]]:
     """
     Recall memori berdasarkan filter.
@@ -824,7 +829,7 @@ def recall_memories(
     Ini adalah operasi READ — tidak mengubah access_count.
     Untuk access tracking, gunakan access_memory().
     """
-    projection = build_memory_recall_projection()
+    projection = build_memory_recall_projection(cache_mode=cache_mode)
     return recall_from_projection(
         projection,
         query=query,
@@ -837,10 +842,31 @@ def recall_memories(
     )
 
 
-def build_memory_recall_projection() -> Dict[str, Any]:
-    """Load one canonical snapshot and build its deterministic recall projection."""
-    store = load_store()
-    return build_recall_projection(store.get("memories", []))
+def build_memory_recall_projection(cache_mode: str = "auto") -> Dict[str, Any]:
+    """Load or reuse one deterministic projection of the canonical store."""
+    with memory_runtime_lock() as paths:
+        return load_or_build_recall_projection_unlocked(
+            paths,
+            lambda: _load_store_unlocked(paths),
+            mode=cache_mode,
+        )
+
+
+def get_memory_recall_cache_status() -> Dict[str, Any]:
+    """Inspect whether the derived recall cache matches canonical state."""
+    with memory_runtime_lock() as paths:
+        return get_recall_cache_status_unlocked(paths)
+
+
+def clear_memory_recall_cache() -> Dict[str, Any]:
+    """Remove only derived recall state; canonical memory is untouched."""
+    with memory_runtime_lock() as paths:
+        return clear_recall_cache_unlocked(paths)
+
+
+def refresh_memory_recall_cache() -> Dict[str, Any]:
+    """Rebuild the recall cache from one validated canonical snapshot."""
+    return build_memory_recall_projection(cache_mode="refresh").get("cache", {})
 
 
 def rank_memory_recall_projection(
