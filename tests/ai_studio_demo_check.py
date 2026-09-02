@@ -345,6 +345,8 @@ def test_angular_context_optimizer():
     expect(
         repeated_memory_projection.get("source_store_loads") == 0
         and repeated_memory_projection.get("cache", {}).get("status") == "hit"
+        and repeated_memory_projection.get("cache", {}).get("storage_model")
+        == "content_addressed_memory_recall_cells_v1"
         and repeated_memory_projection.get("cache", {}).get(
             "entries_reused"
         ) == repeated_memory_projection.get("snapshot_memory_count"),

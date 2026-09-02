@@ -139,6 +139,7 @@ def get_memory_runtime_paths(create: bool = True) -> Dict[str, Any]:
         "project_root": str(project_root),
         "store_path": str(scope_dir / "memory_store.json"),
         "recall_cache_path": str(scope_dir / "recall_projection_cache.json"),
+        "recall_cells_dir": str(scope_dir / "recall_projection_cells"),
         "baseline_path": str(scope_dir / "memory_baseline.json"),
         "consolidation_log_path": str(scope_dir / "consolidation_log.json"),
         "fiber_state_path": str(scope_dir / "fiber_state.json"),
@@ -176,9 +177,12 @@ def _acquire_platform_lock(fd: int) -> Callable[[], None]:
 
 
 @contextlib.contextmanager
-def memory_runtime_lock() -> Iterator[Dict[str, Any]]:
-    """Serialize all state mutations for the current project scope."""
-    paths = get_memory_runtime_paths(create=True)
+def memory_runtime_lock(
+    resolved_paths: Optional[Dict[str, Any]] = None,
+) -> Iterator[Dict[str, Any]]:
+    """Serialize one scope, optionally pinned for a deferred lazy reader."""
+    paths = resolved_paths or get_memory_runtime_paths(create=True)
+    _ensure_directory(Path(paths["scope_dir"]))
     lock_path = Path(paths["lock_path"])
     fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
     _chmod_if_possible(lock_path, 0o600)
@@ -245,6 +249,13 @@ def write_json_unlocked(
         separators=(",", ":") if compact else None,
     ).encode("utf-8")
     _atomic_write_bytes(path, serialized)
+
+
+def write_bytes_unlocked(path_value: str, payload: bytes) -> None:
+    """Atomically write owner-only bytes while the caller holds the lock."""
+    if not isinstance(payload, bytes):
+        raise TypeError("payload must be bytes")
+    _atomic_write_bytes(Path(path_value), payload)
 
 
 def _load_and_validate(
@@ -356,6 +367,7 @@ def memory_runtime_provenance() -> Dict[str, Any]:
         "project_root": paths["project_root"],
         "store_path": store_path,
         "recall_cache_path": paths["recall_cache_path"],
+        "recall_cells_dir": paths["recall_cells_dir"],
         "recovery": _LAST_RECOVERY.get(store_path, {"status": "none"}),
         "storage_claim": "project-scoped local JSON runtime; not model memory",
     }
@@ -369,6 +381,7 @@ __all__ = [
     "get_memory_runtime_paths",
     "memory_runtime_lock",
     "read_json_unlocked",
+    "write_bytes_unlocked",
     "write_json_unlocked",
     "load_json_state",
     "save_json_state",
