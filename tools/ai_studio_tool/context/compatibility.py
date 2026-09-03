@@ -3,7 +3,7 @@ Fiber Compatibility — Fibration Context Domain
 Schema Version: 4.1.0-memory
 """
 
-from typing import Any, Dict, List, Set, Tuple
+from typing import Any, Dict, Tuple
 
 
 def check_fiber_compatibility(

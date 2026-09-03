@@ -240,7 +240,6 @@ def analyze_sheaf(shared_graph: Dict[str, Any]) -> Dict[str, Any]:
     boundaries = shared_graph.get("boundaries", {})
     file_to_boundary = shared_graph.get("file_to_boundary", {})
     resolved_imports = shared_graph.get("resolved_imports", {})
-    file_map = shared_graph.get("file_map", {})
 
     # Build set of barrel files untuk quick lookup
     barrel_files: Set[str] = set()

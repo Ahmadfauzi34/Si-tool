@@ -10,12 +10,11 @@ Unifies:
 """
 
 import os
-import sys
 import json
 import math
 import hashlib
 import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 _TOOL_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_CODEBASE_BASELINE_DIR = os.path.join(_TOOL_ROOT, "data", "codebase", "baseline")
