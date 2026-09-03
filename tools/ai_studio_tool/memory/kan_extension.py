@@ -13,8 +13,7 @@ Perbedaan dengan recall_memories biasa:
 - Kan Extension: COMPLETE (lengkapi fragmen dengan konteks relasional)
 """
 
-import datetime
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Set
 
 
 def left_kan_extension(

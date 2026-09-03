@@ -1,6 +1,5 @@
 
 
-```markdown
 # HoTT Kernel 4.1 — Codebase Intelligence + Topological Memory Suite
 
 > **Schema Version:** 4.1.0-memory

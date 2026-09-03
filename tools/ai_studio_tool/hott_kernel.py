@@ -99,16 +99,6 @@ except ImportError:
         TOPO_QUERIES_AVAILABLE = False
 
 try:
-    from core.synthesizer import synthesize_topological_integrity
-    SYNTHESIS_AVAILABLE = True
-except ImportError:
-    try:
-        from topological_integrity_orchestrator import synthesize_topological_integrity
-        SYNTHESIS_AVAILABLE = True
-    except ImportError:
-        SYNTHESIS_AVAILABLE = False
-
-try:
     from core.synthesizer import encode_topological_invariants
     ENCODER_AVAILABLE = True
 except ImportError:
@@ -131,21 +121,19 @@ except ImportError:
 try:
     from memory.store import (
         store_memory, recall_memories, get_memory_stats,
-        load_store, save_store, access_memory, get_associations_for,
         store_association, consolidate_memories,
     )
     from memory.graph import build_memory_graph
-    from memory.analyzers import run_memory_analyzers, MEMORY_ANALYZER_REGISTRY
+    from memory.analyzers import run_memory_analyzers
     MEMORY_AVAILABLE = True
 except ImportError:
     try:
         from memory_store import (
             store_memory, recall_memories, get_memory_stats,
-            load_store, save_store, access_memory, get_associations_for,
             store_association, consolidate_memories,
         )
         from memory_graph import build_memory_graph
-        from memory_analyzers import run_memory_analyzers, MEMORY_ANALYZER_REGISTRY
+        from memory_analyzers import run_memory_analyzers
         MEMORY_AVAILABLE = True
     except ImportError:
         MEMORY_AVAILABLE = False
@@ -252,11 +240,11 @@ except ImportError:
         FIBRATION_AVAILABLE = False
 
 try:
-    from memory.kan_extension import left_kan_extension, right_kan_extension, kan_retrieve
+    from memory.kan_extension import kan_retrieve
     KAN_EXTENSION_AVAILABLE = True
 except ImportError:
     try:
-        from memory_kan_extension import left_kan_extension, right_kan_extension, kan_retrieve
+        from memory_kan_extension import kan_retrieve
         KAN_EXTENSION_AVAILABLE = True
     except ImportError:
         KAN_EXTENSION_AVAILABLE = False
@@ -1440,11 +1428,14 @@ def kernel_fiber(subcommand: str, args: List[str]) -> Dict[str, Any]:
         i = 0
         while i < len(args):
             if args[i] == "--query" and i + 1 < len(args):
-                query = args[i + 1]; i += 2
+                query = args[i + 1]
+                i += 2
             elif args[i] == "--type" and i + 1 < len(args):
-                mem_type = args[i + 1]; i += 2
+                mem_type = args[i + 1]
+                i += 2
             elif args[i] == "--tags" and i + 1 < len(args):
-                tags = args[i + 1].split(","); i += 2
+                tags = args[i + 1].split(",")
+                i += 2
             elif args[i] == "--max" and i + 1 < len(args):
                 try:
                     max_lift = int(args[i + 1])
@@ -2008,9 +1999,7 @@ def _detect_cross_analyzer_correlations(
 
     # 1. Isomorphic types across boundaries
     iso_res = results.get("hott.isomorphism", {}).get("findings", [])
-    sheaf_res = results.get("hott.sheaf", {}).get("findings", [])
     if iso_res:
-        boundaries = [b.get("boundary") for b in sheaf_res if b.get("boundary")]
         for finding in iso_res:
             if finding.get("type") == "structural_isomorphism":
                 file_a = finding.get("file", "")
@@ -2811,7 +2800,6 @@ def main():
             only_consolidated = True
             memory_type = "episodic"
             dry_run = False
-            restore = False
             restore_all = False
             restore_id = None
             stats = False

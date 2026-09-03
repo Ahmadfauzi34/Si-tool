@@ -659,7 +659,7 @@ def transport_from_archive(
         }
 
     # Initialize new fiber (this archives current if any)
-    init_result = init_fiber(new_task, new_focus)
+    init_fiber(new_task, new_focus)
 
     # Lift transported memories ke fiber baru
     state = load_fiber_state()

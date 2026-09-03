@@ -30,7 +30,7 @@ os.chdir(ROOT)
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from codebase import file_scanner
+from codebase import file_scanner  # noqa: E402
 
 FIXTURES = {
     # F01 basic relative import

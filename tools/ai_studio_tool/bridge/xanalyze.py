@@ -7,7 +7,7 @@ import os
 import json
 import hashlib
 import datetime
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional
 
 SCHEMA_VERSION = "4.1.0-memory"
 

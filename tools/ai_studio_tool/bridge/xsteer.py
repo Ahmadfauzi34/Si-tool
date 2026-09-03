@@ -3,7 +3,7 @@ Unified Cross-Domain Steering — HoTT Kernel Bridge Domain
 Schema Version: 4.1.0-memory
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 SCHEMA_VERSION = "4.1.0-memory"
 
