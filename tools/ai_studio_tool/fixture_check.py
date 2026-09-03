@@ -3573,6 +3573,7 @@ def test_f42_persistent_incremental_memory_recall_cache():
             paths = get_memory_runtime_paths(create=True)
             cache_path = Path(paths["recall_cache_path"])
             integrity_path = Path(f"{cache_path}.sha256")
+            cells_dir = Path(paths["recall_cells_dir"])
             store_path = Path(paths["store_path"])
 
             cold = memory_store.build_memory_recall_projection()
@@ -3606,6 +3607,13 @@ def test_f42_persistent_incremental_memory_recall_cache():
                 and cached_payload.get("canonical_store_authoritative") is True
                 and cached_payload.get("cache_can_restore_canonical_store") is False,
                 f"{name}: authority dan sensitivitas cache harus eksplisit",
+            )
+            expect(
+                cached_payload.get("storage_model")
+                == "content_addressed_memory_recall_cells_v1"
+                and "projection" not in cached_payload
+                and cells_dir.is_dir(),
+                f"{name}: manifest tidak boleh menjadi projection monolitik",
             )
             if os.name != "nt":
                 expect(
@@ -3753,6 +3761,266 @@ def test_f42_persistent_incremental_memory_recall_cache():
                 and cleared.get("status") == "cleared"
                 and len(canonical_after_clear.get("memories", [])) == 256,
                 f"{name}: status/refresh/clear hanya boleh mengelola derived cache",
+            )
+        finally:
+            reset_memory_runtime_configuration()
+
+
+def test_f43_content_addressed_memory_recall_cells():
+    """One mutation rewrites one bounded pack; queries load candidates only."""
+    name = "F43"
+    import hashlib
+    import stat
+
+    import memory.retrieval_cache as retrieval_cache
+    import memory.store as memory_store
+    from memory.retrieval import serialize_recall_projection
+    from memory.runtime import (
+        configure_memory_runtime,
+        get_memory_runtime_paths,
+        reset_memory_runtime_configuration,
+    )
+
+    with tempfile.TemporaryDirectory(prefix="ai-studio-memory-cells-") as tmp:
+        root = Path(tmp)
+        project = root / "project"
+        project.mkdir(parents=True)
+        configure_memory_runtime(
+            project_root=str(project),
+            state_dir=str(root / "state"),
+        )
+        try:
+            store = memory_store._default_store()
+            rare_id = "sem_cell_0431"
+            for index in range(512):
+                content = f"bounded cell observation group {index % 8}"
+                tags = ["cell", f"group-{index % 8}"]
+                if index == 431:
+                    content += " singular quasar needle"
+                    tags.append("rare")
+                memory = memory_store._new_memory_record(
+                    "semantic",
+                    content,
+                    "f43-cells",
+                    0.5,
+                    tags,
+                    {"file": f"src/cells/memory_{index:04d}.ts"},
+                )
+                memory["id"] = f"sem_cell_{index:04d}"
+                store["memories"].append(memory)
+            memory_store.save_store(store)
+
+            paths = get_memory_runtime_paths(create=True)
+            manifest_path = Path(paths["recall_cache_path"])
+            cells_dir = Path(paths["recall_cells_dir"])
+            cold = memory_store.build_memory_recall_projection()
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            pack_files = sorted(cells_dir.glob("*.json"))
+            expect(
+                cold.get("cache", {}).get("cell_packs_written")
+                == len(manifest.get("packs", {}))
+                and 1 < len(pack_files) <= 64
+                and len(pack_files) == len(manifest.get("packs", {})),
+                f"{name}: cold build harus membuat bounded stable packs",
+            )
+            expect(
+                isinstance(manifest.get("record_signatures"), list)
+                and all(
+                    isinstance(value, int)
+                    for postings in manifest.get("term_index", {}).values()
+                    for value in postings
+                )
+                and "projection" not in manifest,
+                f"{name}: manifest harus memakai ordinal tanpa full projection",
+            )
+            for pack_path in pack_files:
+                pack_hash = hashlib.sha256(pack_path.read_bytes()).hexdigest()
+                expect(
+                    pack_path.stem == pack_hash,
+                    f"{name}: nama pack harus menjadi hash exact content",
+                )
+                if os.name != "nt":
+                    expect(
+                        stat.S_IMODE(pack_path.stat().st_mode) == 0o600,
+                        f"{name}: pack full-content harus owner-only",
+                    )
+
+            warm = memory_store.build_memory_recall_projection()
+            warm_ranked = memory_store.rank_memory_recall_projection(
+                warm,
+                query="singular quasar needle",
+                tags=["rare"],
+            )
+            uncached = memory_store.build_memory_recall_projection(
+                cache_mode="off"
+            )
+            uncached_ranked = memory_store.rank_memory_recall_projection(
+                uncached,
+                query="singular quasar needle",
+                tags=["rare"],
+            )
+            expect(
+                [
+                    item.get("memory", {}).get("id")
+                    for item in warm_ranked.get("candidates", [])
+                ]
+                == [
+                    item.get("memory", {}).get("id")
+                    for item in uncached_ranked.get("candidates", [])
+                ]
+                == [rare_id]
+                and warm_ranked.get("trace", {}).get("query_pack_reads") == 1
+                and warm_ranked.get("trace", {}).get(
+                    "candidate_materialized_count"
+                ) == 1
+                and warm_ranked.get("trace", {}).get("snapshot_signature")
+                == uncached_ranked.get("trace", {}).get("snapshot_signature"),
+                f"{name}: lazy predicate harus exact dan membuka satu pack",
+            )
+            equivalence_cases = [
+                {},
+                {"query": "bounded observation"},
+                {"query": "singular quasar needle", "tags": ["rare"]},
+                {"target_files": ["src/cells/memory_0431.ts"]},
+                {
+                    "query": "group 2",
+                    "target_files": ["src/cells/memory_0431.ts"],
+                },
+                {"memory_type": "semantic"},
+                {"tags": ["group-3"]},
+                {"min_importance": 0.6},
+                {"query": "predicate-that-does-not-exist"},
+            ]
+            for case in equivalence_cases:
+                lazy_result = memory_store.rank_memory_recall_projection(
+                    warm, **case
+                )
+                full_result = memory_store.rank_memory_recall_projection(
+                    uncached, **case
+                )
+                lazy_view = [
+                    (
+                        item.get("memory", {}).get("id"),
+                        item.get("retrieval_match"),
+                    )
+                    for item in lazy_result.get("candidates", [])
+                ]
+                full_view = [
+                    (
+                        item.get("memory", {}).get("id"),
+                        item.get("retrieval_match"),
+                    )
+                    for item in full_result.get("candidates", [])
+                ]
+                expect(
+                    lazy_view == full_view
+                    and lazy_result.get("trace", {}).get("candidate_count")
+                    == full_result.get("trace", {}).get("candidate_count")
+                    and lazy_result.get("trace", {}).get("filtered_counts")
+                    == full_result.get("trace", {}).get("filtered_counts"),
+                    f"{name}: lazy/full harus ekuivalen untuk {case}",
+                )
+
+            old_packs = dict(manifest["packs"])
+            old_files = {path.name for path in cells_dir.glob("*.json")}
+            long_lived_projection = warm
+            changed_store = memory_store.load_store()
+            changed_memory = next(
+                memory for memory in changed_store["memories"]
+                if memory.get("id") == rare_id
+            )
+            changed_memory["content"] += " changed once"
+            memory_store.save_store(changed_store)
+            changed = memory_store.build_memory_recall_projection()
+            changed_cache = changed.get("cache", {})
+            next_manifest = json.loads(
+                manifest_path.read_text(encoding="utf-8")
+            )
+            next_files = {path.name for path in cells_dir.glob("*.json")}
+            changed_refs = {
+                partition for partition, content_hash in old_packs.items()
+                if next_manifest["packs"].get(partition) != content_hash
+            }
+            expect(
+                changed_cache.get("status") == "partial"
+                and changed_cache.get("entries_reused") == 511
+                and changed_cache.get("entries_rebuilt") == 1
+                and changed_cache.get("cell_packs_written") == 1
+                and changed_cache.get("cell_packs_reused")
+                == len(next_manifest["packs"]) - 1
+                and changed_cache.get("cell_packs_removed") == 1
+                and changed_cache.get("full_projection_rewrite_avoided") is True
+                and len(changed_refs) == 1
+                and len(next_files) == len(old_files)
+                and len(old_files.symmetric_difference(next_files)) == 2,
+                f"{name}: satu mutation harus mengganti tepat satu pack",
+            )
+
+            full_serialized = json.dumps(
+                serialize_recall_projection(uncached),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            rewritten_bytes = int(changed_cache.get("manifest_bytes_written", 0)) + int(
+                changed_cache.get("cell_bytes_written", 0)
+            )
+            expect(
+                0 < rewritten_bytes < len(full_serialized),
+                f"{name}: partial write harus lebih kecil dari monolith lama",
+            )
+
+            # A projection created before mutation must not race GC. The lazy
+            # provider reloads the current manifest under the same scope lock.
+            long_lived_rank = memory_store.rank_memory_recall_projection(
+                long_lived_projection,
+                query="singular quasar needle changed once",
+            )
+            expect(
+                long_lived_rank.get("trace", {}).get("snapshot_signature")
+                == changed.get("snapshot_signature")
+                and long_lived_rank.get("candidates", [])[0].get(
+                    "memory", {}
+                ).get("id") == rare_id,
+                f"{name}: lazy reader harus konsisten terhadap concurrent GC",
+            )
+
+            rare_partition = retrieval_cache._partition_for_id(rare_id)
+            corrupt_hash = next_manifest["packs"][str(rare_partition)]
+            corrupt_pack = retrieval_cache._cell_path(paths, corrupt_hash)
+            corrupt_pack.write_bytes(b"corrupt-cell")
+            corrupt_status = memory_store.get_memory_recall_cache_status()
+            corrupt_warm = memory_store.build_memory_recall_projection()
+            recovered_rank = memory_store.rank_memory_recall_projection(
+                corrupt_warm,
+                query="singular quasar needle changed once",
+            )
+            expect(
+                corrupt_status.get("status") == "corrupt"
+                and recovered_rank.get("trace", {}).get("cache", {}).get("status")
+                == "read_failed"
+                and recovered_rank.get("trace", {}).get(
+                    "query_fallback_to_canonical"
+                ) is True
+                and recovered_rank.get("candidates", [])[0].get(
+                    "memory", {}
+                ).get("id") == rare_id
+                and not manifest_path.exists(),
+                f"{name}: corrupt candidate pack harus fallback ke authority",
+            )
+
+            rebuilt = memory_store.build_memory_recall_projection()
+            status = memory_store.get_memory_recall_cache_status()
+            cleared = memory_store.clear_memory_recall_cache()
+            expect(
+                rebuilt.get("cache", {}).get("status") == "miss"
+                and status.get("status") == "valid"
+                and status.get("cell_packs_validated")
+                == status.get("cell_pack_count")
+                and cleared.get("status") == "cleared"
+                and not manifest_path.exists()
+                and not cells_dir.exists(),
+                f"{name}: recovery/status/clear harus mencakup semua cells",
             )
         finally:
             reset_memory_runtime_configuration()
@@ -4096,6 +4364,7 @@ def main():
         test_f40_bounded_provenance_retention,
         test_f41_snapshot_consistent_memory_recall_projection,
         test_f42_persistent_incremental_memory_recall_cache,
+        test_f43_content_addressed_memory_recall_cells,
         test_kernel_wiring_smoke,
         test_kernel_cli_contract,
     ]
@@ -4112,7 +4381,7 @@ def main():
             print(f"- {failure}")
         sys.exit(1)
 
-    print("PASS: 39 fixture minimal + 2 portable integration smoke aman")
+    print("PASS: 40 fixture minimal + 2 portable integration smoke aman")
 
 
 if __name__ == "__main__":

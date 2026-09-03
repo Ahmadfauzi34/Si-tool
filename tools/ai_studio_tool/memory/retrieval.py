@@ -14,10 +14,10 @@ import hashlib
 import json
 import os
 import re
-from typing import Any, Dict, Iterable, List, Optional, Set
+from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 
-RECALL_PROJECTION_SCHEMA_VERSION = "memory-recall-projection-v1"
+RECALL_PROJECTION_SCHEMA_VERSION = "memory-recall-projection-v2"
 LEXICAL_MATCH_MODEL = "lexical_overlap_v1"
 MULTI_SIGNAL_MATCH_MODEL = "multi_signal_memory_projection_v1"
 INACTIVE_EVIDENCE_STATUSES = {
@@ -45,6 +45,21 @@ def _terms(value: Any, minimum_length: int = 1) -> Set[str]:
     }
 
 
+def normalize_recall_text(value: Any) -> str:
+    """Public normalization contract shared by persistent predicate indexes."""
+    return _normalize_text(value)
+
+
+def normalize_recall_path(value: Any) -> str:
+    """Public path normalization used by target-file retrieval."""
+    return _normalize_path(value)
+
+
+def recall_terms(value: Any, minimum_length: int = 1) -> Set[str]:
+    """Public tokenizer used by both in-memory and persistent projections."""
+    return _terms(value, minimum_length=minimum_length)
+
+
 def _memory_status(memory: Dict[str, Any]) -> str:
     return str(memory.get("status", "active"))
 
@@ -68,50 +83,76 @@ def _searchable_text(memory: Dict[str, Any]) -> str:
     ]))
 
 
+def memory_record_signature(memory: Dict[str, Any]) -> str:
+    """Hash one complete canonical memory record deterministically."""
+    payload = json.dumps(
+        memory,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return f"sha256:{hashlib.sha256(payload).hexdigest()}"
+
+
+def recall_index_record(memory: Dict[str, Any]) -> Dict[str, Any]:
+    """Return stable fields used by the declared lexical/path predicates."""
+    context = memory.get("context", {})
+    searchable = _searchable_text(memory)
+    file_path = _normalize_path(context.get("file", ""))
+    return {
+        "memory_id": str(memory.get("id", "")),
+        "record_signature": memory_record_signature(memory),
+        "searchable": searchable,
+        "terms": sorted(_terms(searchable)),
+        "tags": sorted({str(tag) for tag in memory.get("tags", [])}),
+        "type": str(memory.get("type", "")),
+        "file": file_path,
+        "basename": os.path.basename(file_path),
+    }
+
+
+def projection_signature_from_records(
+    ordered_memory_ids: Iterable[str],
+    record_signatures: Dict[str, str],
+) -> str:
+    """Compose an exact snapshot signature without materializing all entries."""
+    digest = hashlib.sha256()
+    for memory_id in ordered_memory_ids:
+        digest.update(str(memory_id).encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(str(record_signatures[memory_id]).encode("ascii"))
+        digest.update(b"\n")
+    return f"sha256:{digest.hexdigest()}"
+
+
 def _append_index(index: Dict[str, List[int]], key: str, ordinal: int) -> None:
     if key:
         index.setdefault(key, []).append(ordinal)
 
 
 def _build_recall_entry(memory: Dict[str, Any], ordinal: int) -> Dict[str, Any]:
-    context = memory.get("context", {})
-    searchable = _searchable_text(memory)
-    file_path = _normalize_path(context.get("file", ""))
+    indexed = recall_index_record(memory)
     return {
         "ordinal": ordinal,
         "memory": memory,
-        "searchable": searchable,
-        "terms": _terms(searchable),
-        "tags": {str(tag) for tag in memory.get("tags", [])},
-        "file": file_path,
-        "basename": os.path.basename(file_path),
+        "record_signature": indexed["record_signature"],
+        "searchable": indexed["searchable"],
+        "terms": set(indexed["terms"]),
+        "tags": set(indexed["tags"]),
+        "file": indexed["file"],
+        "basename": indexed["basename"],
         "status": _memory_status(memory),
         "evidence_status": _evidence_status(memory),
     }
 
 
 def _projection_signature(entries: List[Dict[str, Any]]) -> str:
-    digest = hashlib.sha256()
-    for entry in entries:
-        memory = entry["memory"]
-        record = [
-            str(memory.get("id", "")),
-            entry["status"],
-            entry["evidence_status"],
-            str(memory.get("type", "")),
-            float(memory.get("importance", 0.0)),
-            str(memory.get("timestamp", "")),
-            entry["file"],
-            sorted(entry["tags"]),
-            entry["searchable"],
-        ]
-        digest.update(json.dumps(
-            record,
-            ensure_ascii=False,
-            separators=(",", ":"),
-        ).encode("utf-8"))
-        digest.update(b"\n")
-    return f"sha256:{digest.hexdigest()}"
+    ordered_ids = [str(entry["memory"].get("id", "")) for entry in entries]
+    signatures = {
+        str(entry["memory"].get("id", "")): str(entry["record_signature"])
+        for entry in entries
+    }
+    return projection_signature_from_records(ordered_ids, signatures)
 
 
 def _assemble_recall_projection(
@@ -176,7 +217,8 @@ def build_recall_projection(
         memory_id = str(memory.get("id", ""))
         current_ids.add(memory_id)
         prior = prior_by_id.get(memory_id)
-        if prior and prior.get("memory") == memory:
+        signature = memory_record_signature(memory)
+        if prior and prior.get("record_signature") == signature:
             entry = dict(prior)
             entry["ordinal"] = ordinal
             entry["memory"] = memory
@@ -203,6 +245,7 @@ def serialize_recall_projection(projection: Dict[str, Any]) -> Dict[str, Any]:
     for entry in projection.get("entries", []):
         entries.append({
             "memory": entry.get("memory", {}),
+            "record_signature": entry.get("record_signature"),
             "searchable": entry.get("searchable", ""),
             "terms": sorted(entry.get("terms", [])),
         })
@@ -237,6 +280,7 @@ def deserialize_recall_projection(payload: Any) -> Dict[str, Any]:
         if (
             not isinstance(raw, dict)
             or not isinstance(raw.get("memory"), dict)
+            or not isinstance(raw.get("record_signature"), str)
             or not isinstance(raw.get("searchable"), str)
             or not isinstance(raw.get("terms"), list)
             or not all(isinstance(term, str) for term in raw.get("terms", []))
@@ -248,6 +292,7 @@ def deserialize_recall_projection(payload: Any) -> Dict[str, Any]:
         entries.append({
             "ordinal": ordinal,
             "memory": memory,
+            "record_signature": raw["record_signature"],
             "searchable": raw["searchable"],
             "terms": raw["terms"],
             "tags": [str(tag) for tag in memory.get("tags", [])],
@@ -311,6 +356,8 @@ def projection_metadata(projection: Dict[str, Any]) -> Dict[str, Any]:
     }
     if isinstance(projection.get("cache"), dict):
         metadata["cache"] = copy.deepcopy(projection["cache"])
+    if projection.get("storage_model"):
+        metadata["storage_model"] = projection["storage_model"]
     return metadata
 
 
@@ -466,6 +513,42 @@ def rank_recall_projection(
     include_historical_evidence: bool = False,
 ) -> Dict[str, Any]:
     """Rank candidate references without copying the canonical memory records."""
+    provider: Optional[Callable[..., Tuple[Dict[str, Any], Dict[str, Any]]]] = (
+        projection.get("_candidate_provider")
+    )
+    if callable(provider):
+        lazy_target_files = list(target_files or [])
+        materialized, provider_trace = provider(
+            query=query,
+            target_files=lazy_target_files,
+            memory_type=memory_type,
+            tags=list(tags or []),
+        )
+        ranked = rank_recall_projection(
+            materialized,
+            query=query,
+            target_files=lazy_target_files,
+            memory_type=memory_type,
+            tags=tags,
+            min_importance=min_importance,
+            include_archived=include_archived,
+            include_historical_evidence=include_historical_evidence,
+        )
+        trace = ranked["trace"]
+        global_total = int(projection.get("snapshot_memory_count", 0))
+        exact_candidates = int(trace.get("candidate_count", 0))
+        trace.update(projection_metadata(projection))
+        trace.update(provider_trace)
+        trace.update({
+            "candidate_count": exact_candidates,
+            "projection_pruned_count": max(0, global_total - exact_candidates),
+            "candidate_ratio": round(
+                exact_candidates / max(1, global_total), 6
+            ),
+            "snapshot_consistent": True,
+        })
+        return ranked
+
     signals: Dict[int, Dict[str, Any]] = {}
     _query_signals(projection, query, signals)
     normalized_targets = _target_signals(
@@ -596,8 +679,14 @@ __all__ = [
     "RECALL_PROJECTION_SCHEMA_VERSION",
     "build_recall_projection",
     "deserialize_recall_projection",
+    "memory_record_signature",
+    "normalize_recall_path",
+    "normalize_recall_text",
     "projection_metadata",
+    "projection_signature_from_records",
     "rank_recall_projection",
+    "recall_index_record",
     "recall_from_projection",
+    "recall_terms",
     "serialize_recall_projection",
 ]

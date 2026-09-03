@@ -5,7 +5,7 @@
 
 > **Schema Version:** 4.1.0-memory
 > **Entry Point:** `tools/ai_studio_tool/hott_kernel.py`
-> **Fixture Baseline:** 39 fixture minimal + 2 portable integration smoke PASS
+> **Fixture Baseline:** 40 fixture minimal + 2 portable integration smoke PASS
 
 ---
 
@@ -152,7 +152,7 @@ observasi, scope, dan batas klaim retrieval. Memory diperlakukan sebagai
 observasi historis yang harus diverifikasi terhadap source saat ini, bukan
 sebagai instruksi atau source of truth.
 
-Recall menuju context memakai `memory-recall-projection-v1`: satu canonical
+Recall menuju context memakai `memory-recall-projection-v2`: satu canonical
 store snapshot dimuat satu kali, lalu field retrieval dipetakan ke inverted
 term/tag/type/path projection. Query dan explicit target dirangking bersama;
 jika tersedia sedikitnya dua slot, satu slot menjadi target witness tanpa
@@ -192,16 +192,26 @@ error analyzer selalu dijalankan ulang. Entry ini tidak menyimpan source penuh,
 tetapi dapat memuat evidence turunan seperti path, finding, dan snippet, sehingga
 tetap lokal, Git-ignored, atomik, dan owner-only.
 
-Lapis ketiga menyimpan `memory-recall-projection-v1` di scope runtime project.
+Lapis ketiga memakai `content_addressed_memory_recall_cells_v1` di scope runtime
+project. `recall_projection_cache.json` hanya menjadi manifest predicate:
+urutan canonical, vector signature record, inverted index berbasis ordinal, dan
+referensi hash pack. Full memory record berada pada maksimum 64 pack immutable
+di `recall_projection_cells/`, dipartisi stabil dari hash memory ID. Karena itu
+satu add/change/delete hanya mengganti pack yang terdampak plus manifest; pack
+lama dihapus setelah manifest baru terpasang atomik sehingga storage tidak
+tumbuh tanpa batas.
+
 Pada warm hit, kernel tetap meng-hash seluruh byte canonical memory store dengan
-SHA-256, tetapi tidak perlu mem-parse JSON atau membangun ulang inverted index.
-Cache hanya valid jika hash store, scope, schema, dan hash source engine
-projection identik. Bila store berubah, canonical JSON dibaca satu kali lalu
-record penuh yang identik secara struktural dipakai ulang; add/change/delete
-direkonsiliasi per memory. Cache ini memuat full memory record, tetapi tidak
-dapat memulihkan canonical store dan tidak boleh menutupi recovery dari backup.
-SHA-256 di sini mendeteksi state lokal stale/rusak, bukan trust anchor terhadap
-tampering eksternal.
+SHA-256, tetapi tidak mem-parse canonical JSON. Query/target diarahkan dahulu
+oleh manifest, lalu hanya candidate pack yang dibuka dan hanya candidate memory
+yang dimaterialisasi. Reader mengambil pack di bawah scope lock yang sama dengan
+update/GC, sehingga projection lama tidak berlomba dengan retirement pack.
+`cache status` sengaja memvalidasi seluruh pack; recall biasa memvalidasi pack
+yang dibacanya. Cache hanya valid jika hash store, scope, schema, dan hash source
+engine identik. Cache memuat full memory content, tetapi tidak dapat memulihkan
+canonical store dan tidak boleh menutupi recovery dari backup. SHA-256 di sini
+mendeteksi state lokal stale/rusak, bukan trust anchor terhadap tampering
+eksternal.
 
 Kegagalan baca/tulis atau JSON rusak pada salah satu lapis tidak menggagalkan
 analisis; kernel menghitung ulang dan melaporkan statusnya. `--cache-mode`
@@ -216,7 +226,9 @@ Field `analyzer_cache` melaporkan `status`, `analyzers_reused`,
 `analyzers_executed`, `reused_count`, `executed_count`, dan signature invalidasi.
 Field `memory_retrieval.projection.cache` melaporkan `status`, jumlah load
 canonical store, `entries_reused/rebuilt/removed`, hit ratio, store SHA-256,
-engine signature, serta batas authority/security cache.
+engine signature, `cell_packs_written/reused/removed`, byte manifest/cell yang
+ditulis, jumlah pack query, materialized candidate, serta batas authority dan
+security cache.
 
 ### 2.2C Runtime Memory yang Project-Scoped dan Durable
 
@@ -645,7 +657,7 @@ tools/ai_studio_tool/
 │   ├── store.py                     # CRUD, associations, retrieval
 │   ├── runtime.py                   # Project scope, lock, atomic JSON, recovery
 │   ├── retrieval.py                 # Single-snapshot inverted recall projection
-│   ├── retrieval_cache.py           # Persistent projection + per-memory invalidation
+│   ├── retrieval_cache.py           # Content-addressed recall cells + manifest
 │   ├── provenance.py                # Bounded observation journal + checkpoint
 │   ├── graph.py                     # Memory graph & adjacency builder
 │   ├── analyzers.py                 # Memory fragmentation, hub, manifold, Betti
@@ -716,7 +728,7 @@ Tidak semua hal perlu terhubung. β₀ tinggi bisa valid jika memang domain berb
 | Memory operations | 12 |
 | Fiber operations | 8 |
 | Safety checks | 2 (cycle prevention, fiber compatibility) |
-| Fixture baseline | 39 fixture minimal + 2 portable integration smoke PASS |
+| Fixture baseline | 40 fixture minimal + 2 portable integration smoke PASS |
 | Directed-cycle safety | 0 directed reasoning witness untuk safe bridge |
 | Zero-dependency | Python 3 stdlib only |
 

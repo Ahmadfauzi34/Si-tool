@@ -6,7 +6,8 @@ name: ai-studio-hott-kernel
 description: |
   HoTT Kernel 4.1 — Unified Codebase Intelligence + Memory Domain + Fibration
   Context Management. Single entry point (hott_kernel.py) untuk 13 codebase
-  analyzers, persistent graph and analyzer-evidence caches, query-directed context budgeting,
+  analyzers, persistent graph/analyzer caches, content-addressed memory recall
+  cells, query-directed context budgeting,
   memory topology operations,
   fiber-based context management,
   dan cross-domain steering. Gunakan untuk SEMUA analisis codebase dan
@@ -85,6 +86,11 @@ Gunakan `--cache-mode refresh` bila filesystem dapat mempertahankan ketiga stat
 tersebut setelah isi berubah. Source cache mengandung salinan source; analyzer
 cache mengandung evidence turunan. Keduanya lokal dan tidak boleh dimasukkan ke
 Git.
+
+Recall cache memakai manifest ordinal + maksimum 64 pack full-content yang
+content-addressed. Directed query membuka candidate pack saja. Mutation satu
+memory seharusnya melaporkan satu `cell_packs_written` (kecuali perubahan engine
+atau refresh), sedangkan GC menghapus pack yang tidak lagi direferensikan.
 
 Runtime memory wajib project-scoped. Jalankan dari project root atau gunakan
 `--memory-project-root PATH`; gunakan `--memory-scope NAME` hanya untuk identitas
@@ -343,6 +349,10 @@ diabaikan untuk β₀/β₁, sehingga β₁ **bukan** jumlah circular import.
 | `status=miss/refreshed` | Projection dibangun penuh dari canonical snapshot | Normal pada build pertama/forced refresh |
 | `status=recovered` | Cache derived rusak dan berhasil dihitung ulang | Periksa `recovery_reason`; canonical tetap authority |
 | `status=write_failed` | Recall sukses tetapi projection tidak tersimpan | Periksa permission; jangan anggap recall gagal |
+| `storage_model=content_addressed_memory_recall_cells_v1` | Manifest predicate merujuk pack immutable | Jangan menganggap manifest sebagai salinan canonical penuh |
+| `cell_packs_written/reused/removed` | Luas invalidasi fisik | Satu mutation normal harus menyentuh satu partisi lalu GC pack lama |
+| `query_pack_reads/query_memory_materialized` | Working set retrieval aktual | Bandingkan dengan `cell_pack_count/snapshot_memory_count` |
+| `full_projection_rewrite_avoided=true` | Partial update tidak menulis projection monolitik | Audit juga `manifest_bytes_written + cell_bytes_written` |
 | `canonical_recovery_pending=true` | Primary hilang dan backup tersedia | Cache tidak boleh hit; canonical recovery harus dijalankan |
 | `contains_full_memory_content=true` | Cache memuat record memory penuh | Jaga lokal, Git-ignore, dan owner-only |
 | `cache_can_restore_canonical_store=false` | Cache bukan backup atau source of truth | Jangan gunakan untuk merekonstruksi state canonical |
@@ -613,7 +623,7 @@ tools/ai_studio_tool/
 │   ├── store.py                     # CRUD, associations, retrieval
 │   ├── runtime.py                   # Project scope, lock, atomic JSON, recovery
 │   ├── retrieval.py                 # Single-snapshot inverted recall projection
-│   ├── retrieval_cache.py           # Persistent projection + per-memory invalidation
+│   ├── retrieval_cache.py           # Content-addressed recall cells + manifest
 │   ├── provenance.py                # Bounded observation journal + checkpoint
 │   ├── graph.py                     # Memory graph & adjacency builder
 │   ├── analyzers.py                 # Memory fragmentation, hub, manifold, Betti
